@@ -4,8 +4,53 @@
 import Foundation
 import FoundationModels
 import NaturalLanguage
+import SwiftUI
 import Translation
+import UIKit
 import os
+
+@available(iOS 26.0, *)
+private struct SGPrepareTranslationView: View {
+    let source: Locale.Language
+    let target: Locale.Language
+    let onComplete: (Error?) -> Void
+
+    @State private var configuration: TranslationSession.Configuration?
+    @State private var didComplete = false
+
+    init(source: Locale.Language, target: Locale.Language, onComplete: @escaping (Error?) -> Void) {
+        self.source = source
+        self.target = target
+        self.onComplete = onComplete
+        _configuration = State(initialValue: TranslationSession.Configuration(source: source, target: target))
+    }
+
+    var body: some View {
+        Color.clear
+            .translationTask(configuration) { session in
+                do {
+                    try await session.prepareTranslation()
+                    await MainActor.run {
+                        guard !didComplete else { return }
+                        didComplete = true
+                        onComplete(nil)
+                    }
+                } catch {
+                    await MainActor.run {
+                        guard !didComplete else { return }
+                        didComplete = true
+                        onComplete(error)
+                    }
+                }
+            }
+            .onDisappear {
+                if !didComplete {
+                    didComplete = true
+                    onComplete(nil)
+                }
+            }
+    }
+}
 
 @objc(SGOnDeviceTranslation)
 public final class SGOnDeviceTranslation: NSObject {
@@ -53,6 +98,73 @@ public final class SGOnDeviceTranslation: NSObject {
 
     // MARK: Translation framework
 
+    @available(iOS 26.0, *)
+    @MainActor
+    private static func prepareLanguageDownload(source: Locale.Language, target: Locale.Language) async -> Bool {
+        guard let windowScene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first(where: { $0.activationState == .foregroundActive }) ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+              let rootVC = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController ?? windowScene.windows.first?.rootViewController else {
+            return false
+        }
+
+        var topVC = rootVC
+        while let presented = topVC.presentedViewController, !presented.isBeingDismissed {
+            topVC = presented
+        }
+
+        return await withCheckedContinuation { continuation in
+            var finished = false
+            var hosting: UIViewController?
+
+            let finish: (Bool) -> Void = { success in
+                guard !finished else { return }
+                finished = true
+                hosting?.willMove(toParent: nil)
+                hosting?.view.removeFromSuperview()
+                hosting?.removeFromParent()
+                hosting = nil
+                continuation.resume(returning: success)
+            }
+
+            let view = SGPrepareTranslationView(source: source, target: target) { error in
+                finish(error == nil)
+            }
+
+            let controller = UIHostingController(rootView: view)
+            hosting = controller
+            controller.view.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+            controller.view.alpha = 0.01
+            controller.view.backgroundColor = .clear
+            topVC.addChild(controller)
+            topVC.view.addSubview(controller.view)
+            controller.didMove(toParent: topVC)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 60) {
+                finish(false)
+            }
+        }
+    }
+
+    @objc public static func openTranslateSettings() {
+        DispatchQueue.main.async {
+            let app = UIApplication.shared
+            let candidates = [
+                "App-Prefs:TRANSLATE",
+                "prefs:root=TRANSLATE",
+                "translate://",
+                UIApplication.openSettingsURLString
+            ]
+            func tryOpen(index: Int) {
+                guard index < candidates.count, let url = URL(string: candidates[index]) else { return }
+                app.open(url, options: [:]) { success in
+                    if !success {
+                        tryOpen(index: index + 1)
+                    }
+                }
+            }
+            tryOpen(index: 0)
+        }
+    }
+
     @objc public static var translationAvailable: Bool {
         if #available(iOS 26.0, *) { return true }
         return false
@@ -69,7 +181,10 @@ public final class SGOnDeviceTranslation: NSObject {
             case .unsupported:
                 return finish(done, nil, "Apple's Translate does not translate \(name(source)) into \(name(target)).")
             case .supported:
-                return finish(done, nil, "Download \(name(source)) and \(name(target)) in Settings > Apps > Translate > Languages, then try again.")
+                _ = await prepareLanguageDownload(source: source, target: target)
+                if await LanguageAvailability().status(from: source, to: target) != .installed {
+                    return finish(done, nil, "Download \(name(source)) and \(name(target)) in Settings > Apps > Translate > Languages, then try again.")
+                }
             case .installed:
                 break
             @unknown default:
