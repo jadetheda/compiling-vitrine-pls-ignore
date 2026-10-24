@@ -9,6 +9,7 @@ NSString *SGSanitizeEntityURI(NSString *raw);
 // The confirmation notice shown under the Dynamic Island.
 @interface SGAlbumQueueNotice : UIView
 + (void)showIn:(UIWindow *)window title:(NSString *)title detail:(NSString *)detail symbol:(NSString *)symbol;
++ (void)showIn:(UIWindow *)window title:(NSString *)title detail:(NSString *)detail symbol:(NSString *)symbol persistent:(BOOL)persistent;
 @end
 
 // Spotify's ⋯ buttons. An album header's identifier ends in the album's id.

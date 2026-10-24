@@ -80,53 +80,130 @@ static BOOL hasNativeQueueRow(UITableView *table) {
     return NO;
 }
 
+static UIWindow *activeWindow(UIWindow *window) {
+    if (window && window.windowScene && !window.hidden) return window;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (scene.activationState != UISceneActivationStateForegroundActive && scene.activationState != UISceneActivationStateForegroundInactive) continue;
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if (!w.hidden && w.windowLevel == UIWindowLevelNormal) return w;
+        }
+    }
+    return window;
+}
+
 // The outcome as a glass capsule under the Dynamic Island, the way the system confirms an action.
 // It materializes on a critically damped spring, leaves the way it came, and a tap or an upward
 // swipe sends it off early. VoiceOver hears the same words.
 @implementation SGAlbumQueueNotice {
     UIVisualEffectView *_glass;
+    UIImageView *_icon;
+    UILabel *_top;
+    UILabel *_bottom;
     CGFloat _restY;
     BOOL _leaving;
+    BOOL _persistent;
+    uint64_t _generation;
 }
 static __weak SGAlbumQueueNotice *sg_notice;
 
 + (void)showIn:(UIWindow *)window title:(NSString *)title detail:(NSString *)detail symbol:(NSString *)symbol {
+    [self showIn:window title:title detail:detail symbol:symbol persistent:NO];
+}
+
++ (void)showIn:(UIWindow *)window title:(NSString *)title detail:(NSString *)detail symbol:(NSString *)symbol persistent:(BOOL)persistent {
+    window = activeWindow(window);
     if (!window) return;
+
+    if (sg_notice && !sg_notice->_leaving && sg_notice.superview) {
+        [sg_notice updateTitle:title detail:detail symbol:symbol persistent:persistent];
+        return;
+    }
+
     [sg_notice leave:0];
     SGAlbumQueueNotice *notice = [[self alloc] initWithFrame:CGRectZero];
     notice.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    [notice buildIn:window title:title detail:detail symbol:symbol];
+    [notice buildIn:window title:title detail:detail symbol:symbol persistent:persistent];
     sg_notice = notice;
     UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, notice.accessibilityLabel);
-    // Long enough to read: a confirmation is glanced at, a problem is read.
-    NSTimeInterval stay = detail ? 2.5 : 4;
-    __weak SGAlbumQueueNotice *weakNotice = notice;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(stay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ [weakNotice leave:0]; });
+
+    if (!persistent) {
+        uint64_t gen = notice->_generation;
+        NSTimeInterval stay = detail ? 2.5 : 4;
+        __weak SGAlbumQueueNotice *weakNotice = notice;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(stay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (weakNotice && weakNotice->_generation == gen) [weakNotice leave:0];
+        });
+    }
 }
 
-- (void)buildIn:(UIWindow *)window title:(NSString *)title detail:(NSString *)detail symbol:(NSString *)symbol {
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:symbol]];
-    icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleBody scale:UIImageSymbolScaleMedium];
-    icon.tintColor = UIColor.labelColor;
-    icon.contentMode = UIViewContentModeCenter;
-    UILabel *top = [UILabel new];
-    top.text = title;
+- (void)updateTitle:(NSString *)title detail:(NSString *)detail symbol:(NSString *)symbol persistent:(BOOL)persistent {
+    _generation++;
+    _persistent = persistent;
+    _top.text = title;
+    _bottom.text = detail;
+    _icon.image = [UIImage systemImageNamed:symbol];
+    self.accessibilityLabel = detail ? [NSString stringWithFormat:@"%@, %@", title, detail] : title;
+    UIAccessibilityPostNotification(UIAccessibilityAnnouncementNotification, self.accessibilityLabel);
+
+    UIWindow *window = self.window ?: activeWindow(nil);
+    if (window) {
+        CGFloat maxWidth = MIN(window.bounds.size.width - 32, 380), iconSide = 28, pad = 18, gap = 10;
+        CGFloat textMax = maxWidth - pad * 2 - iconSide - gap;
+        CGSize topSize = [_top sizeThatFits:CGSizeMake(textMax, CGFLOAT_MAX)];
+        CGSize bottomSize = detail ? [_bottom sizeThatFits:CGSizeMake(textMax, CGFLOAT_MAX)] : CGSizeZero;
+        CGFloat textWidth = MIN(textMax, MAX(topSize.width, bottomSize.width));
+        CGFloat textHeight = topSize.height + bottomSize.height;
+        CGFloat height = MAX(50, textHeight + 24), width = pad * 2 + iconSide + gap + textWidth;
+        _restY = window.safeAreaInsets.top + 6;
+        CGRect targetFrame = CGRectMake((window.bounds.size.width - width) / 2, _restY, width, height);
+
+        [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:1 initialSpringVelocity:0 options:UIViewAnimationOptionAllowUserInteraction animations:^{
+            self.frame = targetFrame;
+            self->_glass.frame = self.bounds;
+            SGShapeGlass(self->_glass, 22, textHeight < 40);
+            self->_icon.frame = CGRectMake(pad, (height - iconSide) / 2, iconSide, iconSide);
+            CGFloat y = (height - textHeight) / 2;
+            self->_top.frame = CGRectMake(pad + iconSide + gap, y, textWidth, topSize.height);
+            self->_bottom.frame = CGRectMake(pad + iconSide + gap, y + topSize.height, textWidth, bottomSize.height);
+        } completion:nil];
+    }
+
+    if (!persistent) {
+        uint64_t gen = _generation;
+        NSTimeInterval stay = detail ? 2.5 : 4;
+        __weak SGAlbumQueueNotice *weakNotice = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(stay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (weakNotice && weakNotice->_generation == gen) [weakNotice leave:0];
+        });
+    }
+}
+
+- (void)buildIn:(UIWindow *)window title:(NSString *)title detail:(NSString *)detail symbol:(NSString *)symbol persistent:(BOOL)persistent {
+    _persistent = persistent;
+    _generation++;
+    _icon = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:symbol]];
+    _icon.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithTextStyle:UIFontTextStyleBody scale:UIImageSymbolScaleMedium];
+    _icon.tintColor = UIColor.labelColor;
+    _icon.contentMode = UIViewContentModeCenter;
+    _top = [UILabel new];
+    _top.text = title;
     UIFont *subheadline = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
-    top.font = [UIFont systemFontOfSize:subheadline.pointSize weight:UIFontWeightSemibold];
-    top.textColor = UIColor.labelColor;
-    top.numberOfLines = 0;
-    top.textAlignment = detail ? NSTextAlignmentNatural : NSTextAlignmentCenter;
-    UILabel *bottom = [UILabel new];
-    bottom.text = detail;
-    bottom.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    _top.font = [UIFont systemFontOfSize:subheadline.pointSize weight:UIFontWeightSemibold];
+    _top.textColor = UIColor.labelColor;
+    _top.numberOfLines = 0;
+    _top.textAlignment = detail ? NSTextAlignmentNatural : NSTextAlignmentCenter;
+    _bottom = [UILabel new];
+    _bottom.text = detail;
+    _bottom.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
     // secondaryLabelColor reads under 3:1 on the tinted glass; this reads about 5.7:1.
-    bottom.textColor = [UIColor colorWithWhite:1 alpha:0.78];
+    _bottom.textColor = [UIColor colorWithWhite:1 alpha:0.78];
 
     // Hugs its words, up to a width that keeps a line short enough to read at a glance.
     CGFloat maxWidth = MIN(window.bounds.size.width - 32, 380), iconSide = 28, pad = 18, gap = 10;
     CGFloat textMax = maxWidth - pad * 2 - iconSide - gap;
-    CGSize topSize = [top sizeThatFits:CGSizeMake(textMax, CGFLOAT_MAX)];
-    CGSize bottomSize = detail ? [bottom sizeThatFits:CGSizeMake(textMax, CGFLOAT_MAX)] : CGSizeZero;
+    CGSize topSize = [_top sizeThatFits:CGSizeMake(textMax, CGFLOAT_MAX)];
+    CGSize bottomSize = detail ? [_bottom sizeThatFits:CGSizeMake(textMax, CGFLOAT_MAX)] : CGSizeZero;
     CGFloat textWidth = MIN(textMax, MAX(topSize.width, bottomSize.width));
     CGFloat textHeight = topSize.height + bottomSize.height;
     CGFloat height = MAX(50, textHeight + 24), width = pad * 2 + iconSide + gap + textWidth;
@@ -139,11 +216,11 @@ static __weak SGAlbumQueueNotice *sg_notice;
     _glass.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self addSubview:_glass];
     SGShapeGlass(_glass, 22, textHeight < 40);
-    icon.frame = CGRectMake(pad, (height - iconSide) / 2, iconSide, iconSide);
+    _icon.frame = CGRectMake(pad, (height - iconSide) / 2, iconSide, iconSide);
     CGFloat y = (height - textHeight) / 2;
-    top.frame = CGRectMake(pad + iconSide + gap, y, textWidth, topSize.height);
-    bottom.frame = CGRectMake(pad + iconSide + gap, y + topSize.height, textWidth, bottomSize.height);
-    for (UIView *v in @[icon, top, bottom]) [_glass.contentView addSubview:v];
+    _top.frame = CGRectMake(pad + iconSide + gap, y, textWidth, topSize.height);
+    _bottom.frame = CGRectMake(pad + iconSide + gap, y + topSize.height, textWidth, bottomSize.height);
+    for (UIView *v in @[_icon, _top, _bottom]) [_glass.contentView addSubview:v];
 
     self.isAccessibilityElement = YES;
     self.accessibilityLabel = detail ? [NSString stringWithFormat:@"%@, %@", title, detail] : title;
@@ -190,6 +267,7 @@ static __weak SGAlbumQueueNotice *sg_notice;
 - (void)leave:(CGFloat)velocity {
     if (_leaving) return;
     _leaving = YES;
+    _generation++;
     BOOL still = UIAccessibilityIsReduceMotionEnabled();
     CGFloat distance = self.frame.origin.y + self.bounds.size.height;
     CGFloat spring = distance > 0 && velocity < 0 ? -velocity / distance : 0;
