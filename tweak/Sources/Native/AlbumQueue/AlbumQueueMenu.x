@@ -7,7 +7,7 @@
 static const UIControlEvents kActivationEvents = UIControlEventTouchUpInside | UIControlEventPrimaryActionTriggered;
 
 static BOOL isMenuButton(UIControl *control) {
-    return [control.accessibilityIdentifier hasPrefix:SGAlbumQueueButtonPrefix];
+    return [control.accessibilityIdentifier hasPrefix:@"Components.UI.ContextMenuButton"];
 }
 
 %hook UIControl

@@ -1,7 +1,10 @@
+#import <dlfcn.h>
+#import <objc/message.h>
 #import "Core/SGCore.h"
 #import "Shared/Lyrics/Lyrics.h"
 #import "Shared/LyricsSources/LyricsSources.h"
 #import "Shared/AlbumQueue/AlbumQueue.h"
+#import "Settings/SGPageStyle.h"
 #import "LyricsTranslation.h"
 #import "BatchTranslation.h"
 
@@ -21,61 +24,103 @@
 
 static char kURIKey, kRowKey;
 static NSString *sg_pendingURI;
+static NSString *sg_lastActiveEntityURI;
 static CFTimeInterval sg_markedAt;
 static BOOL sg_translating;
 
+static NSString *SGExtractEntityURI(id object) {
+    if (!object) return nil;
+    
+    // 1. If it's a view, check its accessibilityIdentifier
+    if ([object isKindOfClass:UIView.class]) {
+        NSString *ident = ((UIView *)object).accessibilityIdentifier;
+        if ([ident hasPrefix:@"Components.UI.ContextMenuButton-"]) {
+            NSString *sub = [ident substringFromIndex:@"Components.UI.ContextMenuButton-".length];
+            if (sub.length == 22) return [@"spotify:album:" stringByAppendingString:sub];
+        }
+    }
+    
+    // 2. Direct selector queries
+    NSArray<NSString *> *selectors = @[@"pageURI", @"playlistURL", @"playlistURI", @"playlistUri", @"entityURI", @"entityUri", @"uri"];
+    for (NSString *name in selectors) {
+        SEL sel = NSSelectorFromString(name);
+        if ([object respondsToSelector:sel]) {
+            id val = ((id (*)(id, SEL))objc_msgSend)(object, sel);
+            NSString *str = nil;
+            if ([val isKindOfClass:NSURL.class]) str = ((NSURL *)val).absoluteString;
+            else if ([val isKindOfClass:NSString.class]) str = (NSString *)val;
+            NSString *clean = SGSanitizeEntityURI(str);
+            if (clean) return clean;
+        }
+    }
+    
+    // 3. Child objects
+    NSArray<NSString *> *subSelectors = @[@"platformModel", @"defaultHeaderViewModel", @"headerController", @"entityHeaderViewController", @"headerViewController", @"viewModel", @"configuration"];
+    for (NSString *subName in subSelectors) {
+        SEL sel = NSSelectorFromString(subName);
+        if ([object respondsToSelector:sel]) {
+            id sub = ((id (*)(id, SEL))objc_msgSend)(object, sel);
+            if (sub && sub != object) {
+                for (NSString *name in selectors) {
+                    SEL subSel = NSSelectorFromString(name);
+                    if ([sub respondsToSelector:subSel]) {
+                        id val = ((id (*)(id, SEL))objc_msgSend)(sub, subSel);
+                        NSString *str = nil;
+                        if ([val isKindOfClass:NSURL.class]) str = ((NSURL *)val).absoluteString;
+                        else if ([val isKindOfClass:NSString.class]) str = (NSString *)val;
+                        NSString *clean = SGSanitizeEntityURI(str);
+                        if (clean) return clean;
+                    }
+                }
+            }
+        }
+    }
+    
+    // 4. Swift reflection helpers
+    Class albumPage = NSClassFromString(@"SGAlbumQueuePage");
+    if (albumPage && [albumPage respondsToSelector:@selector(albumURI:)]) {
+        NSString *str = [albumPage performSelector:@selector(albumURI:) withObject:object];
+        NSString *clean = SGSanitizeEntityURI(str);
+        if (clean) return clean;
+    }
+    Class entityPage = NSClassFromString(@"SGEntityPage");
+    if (entityPage && [entityPage respondsToSelector:@selector(entityURI:)]) {
+        NSString *str = [entityPage performSelector:@selector(entityURI:) withObject:object];
+        NSString *clean = SGSanitizeEntityURI(str);
+        if (clean) return clean;
+    }
+    
+    return nil;
+}
+
 static NSString *SGResolveEntityURIForView(UIView *view) {
     if (!view) return nil;
-    NSString *identifier = view.accessibilityIdentifier;
-    NSString *prefix = SGAlbumQueueButtonPrefix;
-    NSString *entityID = nil;
-    if ([identifier hasPrefix:prefix]) {
-        entityID = [identifier substringFromIndex:prefix.length];
-        if (entityID.length != 22) entityID = nil;
-    }
-
-    UIViewController *vc = nil;
+    
+    NSString *uri = SGExtractEntityURI(view);
+    if (uri) return uri;
+    
     for (UIResponder *r = view.nextResponder; r; r = r.nextResponder) {
+        uri = SGExtractEntityURI(r);
+        if (uri) return uri;
         if ([r isKindOfClass:UIViewController.class]) {
-            vc = (UIViewController *)r;
-            break;
+            UIViewController *vc = (UIViewController *)r;
+            if (vc.parentViewController) {
+                uri = SGExtractEntityURI(vc.parentViewController);
+                if (uri) return uri;
+            }
         }
     }
-    if (vc) {
-        Class pageClass = NSClassFromString(@"SGEntityPage");
-        if (pageClass && [pageClass respondsToSelector:@selector(entityURI:)]) {
-            NSString *uri = [pageClass performSelector:@selector(entityURI:) withObject:vc];
-            if (SGIsValidEntityURI(uri)) return uri;
-        }
-        Class albumPage = NSClassFromString(@"SGAlbumQueuePage");
-        if (albumPage && [albumPage respondsToSelector:@selector(albumURI:)]) {
-            NSString *uri = [albumPage performSelector:@selector(albumURI:) withObject:vc];
-            if (SGAlbumQueueIsAlbumURI(uri)) return uri;
-        }
-        NSString *name = NSStringFromClass(vc.class);
-        if (entityID && ([name containsString:@"FTP"] || [name containsString:@"Playlist"])) {
-            return [@"spotify:playlist:" stringByAppendingString:entityID];
-        }
-        if (entityID && [name containsString:@"CreativeWork"]) {
-            return [@"spotify:album:" stringByAppendingString:entityID];
-        }
-    }
-    if (entityID) {
-        // Fallback: check if view is within a playlist or album page hierarchy
-        UIView *parent = view;
-        while (parent) {
-            NSString *pName = NSStringFromClass(parent.class);
-            if ([pName containsString:@"CreativeWork"]) return [@"spotify:album:" stringByAppendingString:entityID];
-            if ([pName containsString:@"Playlist"] || [pName containsString:@"FTP"]) return [@"spotify:playlist:" stringByAppendingString:entityID];
-            parent = parent.superview;
-        }
-    }
+    
     return nil;
 }
 
 void SGBatchTranslationMarkSource(UIView *view) {
-    sg_pendingURI = SGResolveEntityURIForView(view);
-    sg_markedAt = CACurrentMediaTime();
+    NSString *resolved = SGResolveEntityURIForView(view);
+    if (resolved) {
+        sg_pendingURI = resolved;
+        sg_lastActiveEntityURI = resolved;
+        sg_markedAt = CACurrentMediaTime();
+    }
 }
 
 BOOL SGBatchTranslationIsRunning(void) {
@@ -470,8 +515,14 @@ void SGBatchTranslateURI(NSString *uri, SGBatchTranslationEngine engine, UIWindo
         action.subtitle = subtitle;
         [items addObject:action];
     }
+    if (!onDevice && !intelligence && !ai) {
+        UIAction *action = [UIAction actionWithTitle:@"No Translator Configured" image:[UIImage systemImageNamed:@"exclamationmark.circle"] identifier:nil handler:nil];
+        action.attributes = UIMenuElementAttributesDisabled;
+        action.subtitle = @"Add an API key in Vitrine Settings";
+        [items addObject:action];
+    }
     self.menu = [UIMenu menuWithTitle:rowTitle image:[UIImage systemImageNamed:@"translate"] identifier:nil options:0 children:items];
-    self.enabled = (items.count > 0);
+    self.enabled = YES;
 }
 @end
 
@@ -488,19 +539,48 @@ static UITableView *tableInView(UIView *view, NSUInteger depth) {
 void SGBatchTranslationInstall(UIViewController *menu) {
     NSString *uri = objc_getAssociatedObject(menu, &kURIKey);
     if (!uri) {
-        uri = (CACurrentMediaTime() - sg_markedAt <= 1.5) ? sg_pendingURI : nil;
-        if (uri) objc_setAssociatedObject(menu, &kURIKey, uri, OBJC_ASSOCIATION_COPY_NONATOMIC);
+        if (CACurrentMediaTime() - sg_markedAt <= 3.0 && SGIsValidEntityURI(sg_pendingURI)) {
+            uri = SGSanitizeEntityURI(sg_pendingURI);
+        }
+    }
+    if (!uri) {
+        // Resolve from presenter hierarchy
+        UIViewController *presenter = menu.presentingViewController ?: menu.navigationController.presentingViewController;
+        while (presenter && !uri) {
+            if ([presenter isKindOfClass:UINavigationController.class]) {
+                UINavigationController *nav = (UINavigationController *)presenter;
+                for (UIViewController *child in nav.viewControllers.reverseObjectEnumerator) {
+                    uri = SGExtractEntityURI(child) ?: SGResolveEntityURIForView(child.viewIfLoaded);
+                    if (uri) break;
+                }
+            } else {
+                uri = SGExtractEntityURI(presenter) ?: SGResolveEntityURIForView(presenter.viewIfLoaded);
+            }
+            if (uri) break;
+            presenter = presenter.presentingViewController;
+        }
+    }
+    if (!uri) {
+        typedef UIView *(*RecentPageFn)(void);
+        RecentPageFn recentPage = (RecentPageFn)dlsym(RTLD_DEFAULT, "SGRPinnedMoreRecentPage");
+        UIView *page = recentPage ? recentPage() : nil;
+        if (page) uri = SGResolveEntityURIForView(page);
+    }
+    if (!uri && SGIsValidEntityURI(sg_lastActiveEntityURI)) {
+        uri = SGSanitizeEntityURI(sg_lastActiveEntityURI);
+    }
+    if (!uri) {
+        UIViewController *top = SGTopController();
+        if (top) uri = SGExtractEntityURI(top) ?: SGResolveEntityURIForView(top.viewIfLoaded);
+    }
+    if (uri) {
+        uri = SGSanitizeEntityURI(uri);
+        objc_setAssociatedObject(menu, &kURIKey, uri, OBJC_ASSOCIATION_COPY_NONATOMIC);
     }
     if (!SGIsValidEntityURI(uri)) return;
     
-    NSString *targetLang = SGLyricsTranslationTarget();
-    BOOL onDevice = SGFlag(SGKeyLyricsTranslateOnDevice, YES) && SGOnDeviceTranslation.translationAvailable;
-    BOOL intelligence = SGFlag(SGKeyLyricsAppleIntelligence, YES) && [SGOnDeviceTranslation appleIntelligenceAvailable:targetLang];
-    BOOL ai = SGAITranslatorReady();
-    if (!onDevice && !intelligence && !ai) return;
-    
     UITableView *table = tableInView(menu.viewIfLoaded, 0);
-    if (table.bounds.size.width <= 0) return;
+    if (!table) return;
     
     SGBatchTranslateRow *row = objc_getAssociatedObject(menu, &kRowKey);
     if (!row) {
@@ -511,6 +591,8 @@ void SGBatchTranslationInstall(UIViewController *menu) {
     
     CGFloat rowHeight = MAX(56, [UIFont preferredFontForTextStyle:UIFontTextStyleBody].lineHeight + 24);
     CGFloat width = table.bounds.size.width;
+    if (width <= 0) width = menu.viewIfLoaded.bounds.size.width;
+    if (width <= 0) width = UIScreen.mainScreen.bounds.size.width;
     
     UIView *existingFooter = table.tableFooterView;
     if (existingFooter == row) {
@@ -565,6 +647,29 @@ void SGBatchTranslationInstall(UIViewController *menu) {
         [table layoutIfNeeded];
     }];
 }
+
+%hook _TtC35ListUXPlatform_FreeTierPlaylistImpl17FTPViewController
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    NSString *uri = SGExtractEntityURI(self) ?: SGResolveEntityURIForView(((UIViewController *)self).viewIfLoaded);
+    if (uri) sg_lastActiveEntityURI = [uri copy];
+}
+- (void)viewDidLayoutSubviews {
+    %orig;
+    if (!sg_lastActiveEntityURI) {
+        NSString *uri = SGExtractEntityURI(self) ?: SGResolveEntityURIForView(((UIViewController *)self).viewIfLoaded);
+        if (uri) sg_lastActiveEntityURI = [uri copy];
+    }
+}
+%end
+
+%hook _TtC28CreativeWorkPlatform_PageKit24CreativeWorkTemplateView
+- (void)layoutSubviews {
+    %orig;
+    NSString *uri = SGResolveEntityURIForView((UIView *)self);
+    if (uri) sg_lastActiveEntityURI = [uri copy];
+}
+%end
 
 %hook _TtC24ContextMenu_InternalImpl25ContextMenuViewController
 - (void)viewDidLayoutSubviews {
