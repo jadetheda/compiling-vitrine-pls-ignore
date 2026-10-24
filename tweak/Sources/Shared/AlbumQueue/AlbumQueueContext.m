@@ -34,3 +34,5 @@ NSArray<NSString *> *SGAlbumQueueTrackURIs(id context, NSString *uri, NSString *
 }
 
 BOOL SGAlbumQueueIsAlbumURI(NSString *uri) { return validURI(uri, @"spotify:album:"); }
+BOOL SGIsPlaylistURI(NSString *uri) { return validURI(uri, @"spotify:playlist:"); }
+BOOL SGIsValidEntityURI(NSString *uri) { return validURI(uri, @"spotify:album:") || validURI(uri, @"spotify:playlist:"); }

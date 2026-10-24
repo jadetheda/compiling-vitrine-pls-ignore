@@ -1,4 +1,5 @@
 #import <CommonCrypto/CommonDigest.h>
+#import <NaturalLanguage/NaturalLanguage.h>
 #import <Security/Security.h>
 #import "Core/SGCore.h"
 #import "Settings/SGModPage.h"
@@ -13,6 +14,10 @@ static NSString *const kDefaultPrompt =
     @"Translate the lines of this song into {language}: exactly {count} translations, one per input line and in "
     @"the same order. Translate the meaning naturally, keep each line short like a lyric, and keep an empty line "
     @"empty. A line already in {language} stays as it is.";
+static NSString *const kDefaultBatchPrompt =
+    @"Translate the lyrics of these {count} songs into {language}. Translate the meaning naturally as sung, "
+    @"keep each line short like a lyric, and keep empty lines empty. Lines already in {language} stay as they are. "
+    @"Return a JSON object with the exact same track IDs as keys, mapping each to an array of translated lines in the exact same order.";
 static NSString *const kOpenAIDefaultURL = @"https://api.openai.com/v1";
 // The OpenAI-compatible server is kept beside its key, never in the settings: a settings file from someone
 // else could otherwise point a key stored here at their own server.
@@ -314,6 +319,82 @@ static NSString *promptTemplate(void) {
     return storedString(SGKeyAIPrompt) ?: kDefaultPrompt;
 }
 
+NSString *SGLyricsBatchPromptTemplate(void) {
+    return storedString(SGKeyLyricsBatchPrompt) ?: kDefaultBatchPrompt;
+}
+
+NSUInteger SGLyricsBatchSize(void) {
+    NSNumber *val = [NSUserDefaults.standardUserDefaults objectForKey:SGKeyLyricsBatchSize];
+    if (!val) return 5;
+    NSInteger n = val.integerValue;
+    if (n == 0) return 0;
+    if (n == 3 || n == 5 || n == 8 || n == 10) return (NSUInteger)n;
+    return 5;
+}
+
+BOOL SGLyricsBatchSkipSaved(void) {
+    return SGFlag(SGKeyLyricsBatchSkipSaved, YES);
+}
+
+static BOOL hasWords(SGKaraokeLine *line) {
+    NSString *text = SGKaraokeLineText(line);
+    return text.length > 0 && ![text isEqualToString:@"♪"];
+}
+
+static NSUInteger otherScriptLetters(NSString *text, BOOL latinTarget) {
+    __block NSUInteger count = 0;
+    [text enumerateSubstringsInRange:NSMakeRange(0, text.length) options:NSStringEnumerationByComposedCharacterSequences
+                          usingBlock:^(NSString *character, NSRange range, NSRange enclosing, BOOL *stop) {
+        UTF32Char c = 0;
+        if (![character getBytes:&c maxLength:sizeof(c) usedLength:NULL encoding:NSUTF32LittleEndianStringEncoding options:0
+                           range:NSMakeRange(0, character.length) remainingRange:NULL]) return;
+        if (![NSCharacterSet.letterCharacterSet longCharacterIsMember:c]) return;
+        BOOL latin = c < 0x250 || (c >= 0x1E00 && c < 0x1F00);
+        if (latin != latinTarget) count++;
+    }];
+    return count;
+}
+
+static NSUInteger romanizedKoreanWords(NSString *text) {
+    NSUInteger count = 0;
+    for (NSString *word in [text componentsSeparatedByCharactersInSet:NSCharacterSet.letterCharacterSet.invertedSet]) {
+        if ([word containsString:@"eo"] || [word containsString:@"eu"]) count++;
+    }
+    return count;
+}
+
+BOOL SGKaraokeInAnotherLanguage(NSArray<SGKaraokeLine *> *lines, NSString *language) {
+    if (!lines.count || !language.length) return NO;
+    NSString *(^code)(NSString *) = ^NSString *(NSString *tag) {
+        return [tag componentsSeparatedByCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@"-_"]].firstObject.lowercaseString;
+    };
+    NSString *target = code(language);
+    NSString *targetScript = [NSOrthography defaultOrthographyForLanguage:language].dominantScript;
+    NSUInteger distinct = 0, sure = 0, foreign = 0, otherScript = 0;
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    NLLanguageRecognizer *recognizer = [NLLanguageRecognizer new];
+    for (SGKaraokeLine *line in lines) {
+        NSString *text = hasWords(line) ? SGKaraokeLineText(line).lowercaseString : nil;
+        if (!text.length || [seen containsObject:text]) continue;
+        [seen addObject:text];
+        distinct++;
+        BOOL lettersOther = otherScriptLetters(text, [targetScript isEqualToString:@"Latn"]) >= 2;
+        if (lettersOther) otherScript++;
+        [recognizer reset];
+        [recognizer processString:text];
+        NSDictionary<NLLanguage, NSNumber *> *guess = [recognizer languageHypothesesWithMaximum:1];
+        NLLanguage found = guess.allKeys.firstObject;
+        BOOL confident = found && guess[found].doubleValue >= 0.8, inTarget = confident && [code(found) isEqualToString:target];
+        if (!lettersOther && !inTarget && romanizedKoreanWords(text) >= 2) otherScript++;
+        if (!confident) continue;
+        sure++;
+        if (inTarget) continue;
+        foreign++;
+        if (!lettersOther && ![[NSOrthography defaultOrthographyForLanguage:found].dominantScript isEqualToString:targetScript]) otherScript++;
+    }
+    return !sure || foreign * 5 >= MAX(distinct, 5) || otherScript >= 2;
+}
+
 // The first 8 hex digits of the template's SHA-256, for the log: which prompt went, never what the lyrics were.
 static NSString *fingerprint(NSString *text) {
     NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
@@ -522,6 +603,136 @@ void SGLyricsTranslateWithAI(NSString *trackID, NSArray<SGKaraokeLine *> *lines,
         dispatch_async(dispatch_get_main_queue(), ^{
             if (translations && trackID) sg_done[memo] = translations;
             done(translations, problem);
+        });
+    });
+}
+
+static NSDictionary *batchMapIn(NSString *text) {
+    if (!text.length) return nil;
+    id parsed = [NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+    if (!parsed) {
+        NSRange open = [text rangeOfString:@"{"];
+        NSRange close = [text rangeOfString:@"}" options:NSBackwardsSearch];
+        if (open.location != NSNotFound && close.location != NSNotFound && close.location > open.location) {
+            NSString *inner = [text substringWithRange:NSMakeRange(open.location, close.location - open.location + 1)];
+            parsed = [NSJSONSerialization JSONObjectWithData:[inner dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+        }
+    }
+    if ([parsed isKindOfClass:NSDictionary.class]) {
+        if ([parsed[@"songs"] isKindOfClass:NSDictionary.class]) return parsed[@"songs"];
+        if ([parsed[@"tracks"] isKindOfClass:NSDictionary.class]) return parsed[@"tracks"];
+        return parsed;
+    }
+    return nil;
+}
+
+static NSURLRequest *batchRequestFor(const SGAIProvider *p, NSString *modelID, NSString *prompt, NSString *key, BOOL plain) {
+    if ([p->tag isEqualToString:@"gemini"]) {
+        NSMutableArray *safety = [NSMutableArray array];
+        for (NSString *category in @[@"HARM_CATEGORY_HARASSMENT", @"HARM_CATEGORY_HATE_SPEECH",
+                                     @"HARM_CATEGORY_SEXUALLY_EXPLICIT", @"HARM_CATEGORY_DANGEROUS_CONTENT"]) {
+            [safety addObject:@{@"category": category, @"threshold": @"BLOCK_NONE"}];
+        }
+        NSMutableDictionary *config = [@{@"responseMimeType": @"application/json"} mutableCopy];
+        if (!plain) config[@"thinkingConfig"] = @{@"thinkingLevel": @"low"};
+        NSMutableURLRequest *req = post([NSString stringWithFormat:@"https://generativelanguage.googleapis.com/v1beta/models/%@:generateContent", modelID],
+                                        @{@"contents": @[@{@"parts": @[@{@"text": prompt}]}], @"safetySettings": safety, @"generationConfig": config});
+        [req setValue:key forHTTPHeaderField:@"x-goog-api-key"];
+        return req;
+    }
+    if ([p->tag isEqualToString:@"openai"]) {
+        NSString *server = openAIServer();
+        NSMutableDictionary *body = [@{@"model": modelID, @"messages": @[@{@"role": @"user", @"content": prompt}]} mutableCopy];
+        if (!plain) {
+            body[@"response_format"] = @{@"type": @"json_object"};
+            body[@"reasoning_effort"] = @"low";
+        }
+        NSMutableURLRequest *req = post(server ? [server stringByAppendingString:@"/chat/completions"] : nil, body);
+        [req setValue:[@"Bearer " stringByAppendingString:key] forHTTPHeaderField:@"Authorization"];
+        return req;
+    }
+    if ([p->tag isEqualToString:@"anthropic"]) {
+        NSMutableDictionary *body = [@{@"model": modelID, @"max_tokens": @16000,
+                                       @"messages": @[@{@"role": @"user", @"content": prompt}]} mutableCopy];
+        if (!plain) body[@"output_config"] = @{@"effort": @"low"};
+        NSMutableURLRequest *req = post(@"https://api.anthropic.com/v1/messages", body);
+        [req setValue:key forHTTPHeaderField:@"x-api-key"];
+        [req setValue:@"2026-10-21" forHTTPHeaderField:@"anthropic-version"];
+        return req;
+    }
+    return p->request(modelID, prompt, key, plain);
+}
+
+void SGLyricsTranslateBatchWithAI(NSDictionary<NSString *, NSArray<NSString *> *> *songs,
+                                  NSString *languageTag,
+                                  void (^done)(NSDictionary<NSString *, NSArray<NSString *> *> *results, NSString *error)) {
+    const SGAIProvider *p = chosen();
+    NSString *key = storedSecret(p, kKeyAccount), *modelID = model(p), *template = SGLyricsBatchPromptTemplate();
+    if (!key || !modelID) {
+        done(nil, [NSString stringWithFormat:@"Add a %@ API key%@ on the Lyrics page first.", p->name, modelID ? @"" : @" and a model"]);
+        return;
+    }
+    if (!songs.count) {
+        done(@{}, nil);
+        return;
+    }
+    NSString *language = [[NSLocale localeWithLocaleIdentifier:@"en"] localizedStringForLocaleIdentifier:languageTag] ?: languageTag;
+    NSData *inputData = [NSJSONSerialization dataWithJSONObject:songs options:NSJSONWritingPrettyPrinted error:nil];
+    NSString *inputJSON = inputData ? [[NSString alloc] initWithData:inputData encoding:NSUTF8StringEncoding] : @"{}";
+    
+    NSString *instructions = template;
+    instructions = [[instructions stringByReplacingOccurrencesOfString:@"{language}" withString:language]
+                    stringByReplacingOccurrencesOfString:@"{count}" withString:@(songs.count).stringValue];
+    NSString *prompt = [NSString stringWithFormat:@"%@\n\n%@", instructions, inputJSON];
+    
+    NSURLRequest *request = batchRequestFor(p, modelID, prompt, key, NO);
+    NSURLRequest *plain = batchRequestFor(p, modelID, prompt, key, YES);
+    if (!request) {
+        done(nil, @"The OpenAI-compatible server's URL is not usable. Check it on the Lyrics page.");
+        return;
+    }
+    SGLog(@"ai batch: asking %@ %@ (%lu songs) into %@, prompt %@", p->tag, modelID, (unsigned long)songs.count, languageTag, fingerprint(template));
+    send(p, request, plain, 0, ^(NSData *data, NSInteger status, NSError *error) {
+        id root = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        NSString *who = speaker(p);
+        NSString *stopped = nil;
+        NSDictionary *rawDict = status == 200 ? batchMapIn(p->answer(root, who, &stopped)) : nil;
+        
+        NSMutableDictionary<NSString *, NSArray<NSString *> *> *results = [NSMutableDictionary dictionary];
+        if (rawDict) {
+            for (NSString *trackKey in songs) {
+                NSString *altKey = [trackKey hasPrefix:@"spotify:track:"] ? [trackKey substringFromIndex:@"spotify:track:".length] : [@"spotify:track:" stringByAppendingString:trackKey];
+                id rawLines = rawDict[trackKey] ?: rawDict[altKey];
+                if ([rawLines isKindOfClass:NSArray.class]) {
+                    NSMutableArray<NSString *> *clean = [NSMutableArray array];
+                    for (id l in rawLines) [clean addObject:[l isKindOfClass:NSString.class] ? l : [l description]];
+                    results[trackKey] = clean;
+                }
+            }
+        }
+        
+        NSString *problem = nil;
+        if (results.count > 0) {
+            // Success
+        } else if (error) {
+            problem = [NSString stringWithFormat:@"%@ could not be reached.", who];
+        } else if (status == 401 || status == 403) {
+            problem = [NSString stringWithFormat:@"%@ turned the key down. Check it on the Lyrics page.", who];
+        } else if (status == 429) {
+            problem = [NSString stringWithFormat:@"%@'s limit for this key is reached for now.", who];
+        } else if (status >= 500) {
+            problem = [NSString stringWithFormat:@"%@ is busy right now. Try again in a minute.", who];
+        } else if (status != 200) {
+            problem = [NSString stringWithFormat:@"%@ returned an error (%ld).", who, (long)status];
+        } else if (stopped) {
+            problem = stopped;
+        } else {
+            problem = [NSString stringWithFormat:@"%@'s batch answer could not be read. Try again.", who];
+        }
+        
+        SGLog(@"ai batch: %@ answered %lu of %lu songs into %@: %@", p->tag, (unsigned long)results.count, (unsigned long)songs.count, languageTag, problem ?: @"ok");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            done(results.count ? results : nil, problem);
         });
     });
 }
@@ -736,6 +947,70 @@ static NSArray<NSString *> *modelMenu(const SGAIProvider *p) {
 }
 @end
 
+@interface SGBatchPromptEditor : UIViewController
+@end
+
+@implementation SGBatchPromptEditor {
+    UITextView *_text;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Batch prompt";
+    self.view.backgroundColor = UIColor.systemGroupedBackgroundColor;
+    _text = [UITextView new];
+    _text.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    _text.adjustsFontForContentSizeCategory = YES;
+    _text.backgroundColor = UIColor.clearColor;
+    _text.textContainerInset = UIEdgeInsetsMake(16, 16, 16, 16);
+    _text.alwaysBounceVertical = YES;
+    _text.keyboardDismissMode = UIScrollViewKeyboardDismissModeInteractive;
+    _text.text = SGLyricsBatchPromptTemplate();
+    _text.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:_text];
+    UILabel *note = [UILabel new];
+    note.text = @"For multi-song batch translations. {language} and {count} are filled in for each batch; "
+                @"the songs' lines follow as a JSON object mapping track IDs to arrays of lines.";
+    note.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    note.adjustsFontForContentSizeCategory = YES;
+    note.textColor = UIColor.secondaryLabelColor;
+    note.numberOfLines = 0;
+    note.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:note];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [note.topAnchor constraintEqualToAnchor:safe.topAnchor constant:12],
+        [note.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:20],
+        [note.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-20],
+        [_text.topAnchor constraintEqualToAnchor:note.bottomAnchor constant:4],
+        [_text.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [_text.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [_text.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor],
+    ]];
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemClose target:self action:@selector(close)];
+    UIBarButtonItem *done = [[UIBarButtonItem alloc] initWithImage:[UIImage systemImageNamed:@"checkmark"] style:UIBarButtonItemStylePlain target:self action:@selector(save)];
+    done.accessibilityLabel = @"Save";
+    UIBarButtonItem *reset = [[UIBarButtonItem alloc] initWithTitle:@"Default" style:UIBarButtonItemStylePlain target:self action:@selector(reset)];
+    self.navigationItem.rightBarButtonItems = @[done, reset];
+}
+
+- (void)close {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)reset {
+    _text.text = kDefaultBatchPrompt;
+}
+
+- (void)save {
+    NSString *prompt = [_text.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (!prompt.length || [prompt isEqualToString:kDefaultBatchPrompt]) [NSUserDefaults.standardUserDefaults removeObjectForKey:SGKeyLyricsBatchPrompt];
+    else [NSUserDefaults.standardUserDefaults setObject:prompt forKey:SGKeyLyricsBatchPrompt];
+    SGLog(@"ai: batch prompt %@", storedString(SGKeyLyricsBatchPrompt) ? [@"edited, " stringByAppendingString:fingerprint(prompt)] : @"default");
+    [self close];
+}
+@end
+
 NSArray<SGModRow *> *SGAITranslatorRows(void) {
     NSMutableArray<NSString *> *names = [NSMutableArray array];
     for (NSUInteger i = 0; i < kProviderCount; i++) [names addObject:kProviders[i].name];
@@ -795,5 +1070,26 @@ NSArray<SGModRow *> *SGAITranslatorRows(void) {
         else [NSUserDefaults.standardUserDefaults setInteger:timeoutSeconds[index].integerValue forKey:SGKeyLyricsAITimeout];
     });
 
-    return @[provider, key, models, thinking, timeout, prompt];
+    NSArray<NSString *> *batchSizeOptions = @[@"3 songs", @"5 songs (recommended)", @"8 songs", @"10 songs", @"All at once (Single prompt)"];
+    SGModRow *batchSizeRow = SGMenuRow(@"Songs per batch", batchSizeOptions, ^NSString *{
+        NSUInteger size = SGLyricsBatchSize();
+        if (size == 0) return @"All at once (Single prompt)";
+        if (size == 3) return @"3 songs";
+        if (size == 8) return @"8 songs";
+        if (size == 10) return @"10 songs";
+        return @"5 songs (recommended)";
+    }, ^(NSInteger index) {
+        NSUInteger size = (index == 0) ? 3 : ((index == 1) ? 5 : ((index == 2) ? 8 : ((index == 3) ? 10 : 0)));
+        if (size == 5) [NSUserDefaults.standardUserDefaults removeObjectForKey:SGKeyLyricsBatchSize];
+        else [NSUserDefaults.standardUserDefaults setInteger:size forKey:SGKeyLyricsBatchSize];
+    });
+    SGModRow *batchPromptRow = SGStatActionRow(@"Batch prompt", @"Prompt used when translating multiple songs at once",
+                                               ^NSString *{ return storedString(SGKeyLyricsBatchPrompt) ? @"Edited" : @"Default"; }, ^{
+        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:[SGBatchPromptEditor new]];
+        nav.modalPresentationStyle = UIModalPresentationPageSheet;
+        SGPresentDark(nav);
+        [SGTopController() presentViewController:nav animated:YES completion:nil];
+    });
+    SGModRow *skipSavedRow = SGSwitchRow(@"Skip saved translations", @"Skip songs that already have a saved translation", SGKeyLyricsBatchSkipSaved);
+    return @[provider, key, models, thinking, timeout, prompt, batchSizeRow, batchPromptRow, skipSavedRow];
 }
