@@ -86,6 +86,9 @@ enum { kMaxOutputs = 8, kMaxWatchers = 4 };
 
 static float sg_speed = 1, sg_semitones;     // main thread
 static atomic_uint sg_speedBits;             // sg_speed for SPTPlayerState, read on any thread
+static _Atomic bool sg_mixerSilent;          // render thread notes mixer silence away from 1x
+static BOOL sg_stalled;                      // main thread: whether a stall occurred away from 1x
+static CFAbsoluteTime sg_lastStallSync;      // main thread: cooldown for mid-run stall recovery
 
 typedef struct {
     atomic_uint_fast64_t rateBits;
@@ -269,13 +272,14 @@ static OSStatus pullSource(Output *output, AudioUnit source, const AudioTimeStam
         #endif
         if ((status != noErr || (flags & kAudioUnitRenderAction_OutputIsSilence))
             && observesSource && output == music()) SGPlayerInvalidateSource();
+        bool quiet = status == noErr && !(flags & kAudioUnitRenderAction_OutputIsSilence) && target->mBuffers[0].mData;
+        const float *samples = target->mBuffers[0].mData;
+        for (UInt32 i = 0; quiet && i < count; i++) if (fabsf(samples[i]) > 1e-4f) quiet = false;
+        bool silentPull = (flags & kAudioUnitRenderAction_OutputIsSilence) || status != noErr || quiet;
+        if (silentPull && output == music()) atomic_store_explicit(&sg_mixerSilent, true, memory_order_relaxed);
         #if SG_DRIVER
         if (output == music()) {
-            // Silent as flagged, or as heard: every sample of the first channel under -80 dBFS.
-            bool quiet = status == noErr && !(flags & kAudioUnitRenderAction_OutputIsSilence) && target->mBuffers[0].mData;
-            const float *samples = target->mBuffers[0].mData;
-            for (UInt32 i = 0; quiet && i < count; i++) if (fabsf(samples[i]) > 1e-4f) quiet = false;
-            noteSilence((flags & kAudioUnitRenderAction_OutputIsSilence) || status != noErr || quiet, count, rateOf(&output->client), anchorHost);
+            noteSilence(silentPull, count, rateOf(&output->client), anchorHost);
         }
         if (output == music()) {
             double rate = rateOf(&output->client);
@@ -305,7 +309,7 @@ static OSStatus pullSource(Output *output, AudioUnit source, const AudioTimeStam
             return noErr;
         }
         // A buffer marked silent may still hold what was in it before; nothing after this reads the mark.
-        if (flags & kAudioUnitRenderAction_OutputIsSilence) {
+        if (silentPull) {
             silence(target);
         } else if (output == music()) {
             double rate = rateOf(&output->client);
@@ -1067,11 +1071,21 @@ static NSString *trackOf(SPTPlayerState *state) {
     return [state.track.URI description];
 }
 
+static void resetUnit(void) {
+    SGTimePitch *unit = atomic_load(tapped() ? &sg_pull : &sg_inPlace);
+    if (!unit) return;
+    disengage();
+    SGTimePitchReset(unit);
+    if (sg_speed != 1 || sg_semitones != 0) atomic_store(&sg_engaged, true);
+}
+
 // Spotify's clock again from here; away from 1x, its next report starts the own clock over.
 static void handBack(void) {
     os_unfair_lock_lock(&sg_clockLock);
     sg_clock = (typeof(sg_clock)){.armed = loadFloat(&sg_speedBits) != 1, .notBefore = CFAbsoluteTimeGetCurrent()};
     os_unfair_lock_unlock(&sg_clockLock);
+    sg_stalled = NO;
+    resetUnit();
 }
 
 void SGSetPlayerSpeed(double speed) {
@@ -1080,18 +1094,33 @@ void SGSetPlayerSpeed(double speed) {
     // -position, outside this file's, takes its lead off what this one returns.
     SPTPlayerState *state = SGPlayerState();
     sg_spotifyPosition = -1;
-    [state position];
-    double position = sg_spotifyPosition, lead = leadOfState(state), held = heldLeadNow();
+    double actual = [state position];
+    double reported = sg_spotifyPosition;
+    double lead = leadOfState(state), held = heldLeadNow();
     os_unfair_lock_lock(&sg_clockLock);
-    if (!sg_clock.on && !sg_clock.armed && speed != 1 && state && position >= 0) {
-        sg_clock = (typeof(sg_clock)){.on = YES, .position = position - lead, .played = playedSeconds(), .lead = held};
+    if (!sg_clock.on && !sg_clock.armed && speed != 1 && state && reported >= 0) {
+        sg_clock = (typeof(sg_clock)){.on = YES, .position = reported - lead, .played = playedSeconds(), .lead = held};
         sg_clockTrack = trackOf(state);
     }
     if ((float)speed != sg_speed) sg_speedChangedAt = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_unlock(&sg_clockLock);
+    BOOL returningToNormal = speed == 1 && sg_speed != 1;
+    BOOL wasStalled = sg_stalled || atomic_exchange_explicit(&sg_mixerSilent, false, memory_order_relaxed);
+    if (sg_speed == 1 && speed != 1) {
+        atomic_store_explicit(&sg_mixerSilent, false, memory_order_relaxed);
+        sg_stalled = NO;
+        sg_lastStallSync = 0;
+    }
     sg_speed = (float)speed;
     storeFloat(&sg_speedBits, sg_speed);
     apply();
+    if (returningToNormal && (wasStalled || (reported >= 0 && fabs(actual - reported) > 1.5))) {
+        double duration = [state respondsToSelector:@selector(duration)] ? state.duration : 0;
+        if (actual >= 0 && (duration <= 0 || actual < duration - 0.5)) {
+            id player = SGPlayer();
+            if ([player respondsToSelector:@selector(seekTo:)]) [(id<SPTPlayer>)player seekTo:actual];
+        }
+    }
 }
 
 float SGPlayerPitch(void) {
@@ -1264,12 +1293,45 @@ BOOL SGPlayerWatchMusicOutput(SGPlayerOutputWatcher watcher) {
 }
 %end
 
+@interface SGSpeedObserver : NSObject <SGPlayerStateObserver>
+@end
+
+@implementation SGSpeedObserver
+- (void)playerStateDidChange:(SPTPlayerState *)state {}
+- (void)playerStateDidReport:(SPTPlayerState *)state {
+    int buffering = [state respondsToSelector:NSSelectorFromString(@"isBuffering")] ? [[state valueForKey:@"isBuffering"] boolValue] : -1;
+    BOOL stalled = state.isPlaying && !state.isPaused && state.playbackSpeed == 0;
+    if (buffering == 1 || stalled) {
+        float speed = loadFloat(&sg_speedBits);
+        if (speed != 1) {
+            sg_stalled = YES;
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if (now - sg_lastStallSync > 3.0) {
+                sg_lastStallSync = now;
+                double actual = [state position];
+                double reported = sg_spotifyPosition;
+                double duration = [state respondsToSelector:@selector(duration)] ? state.duration : 0;
+                if (reported >= 0 && actual - reported > 2.0 && (duration <= 0 || actual < duration - 1.0)) {
+                    id player = SGPlayer();
+                    if ([player respondsToSelector:@selector(seekTo:)]) [(id<SPTPlayer>)player seekTo:actual];
+                }
+            }
+        }
+    }
+}
+@end
+
 %ctor {
     storeFloat(&sg_speedBits, 1);
     storeFloat(&sg_gainBits, 1);
     rebind();
     %init;
     SGRequireClasses(@[@"SPTPlayerState"]);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        static SGSpeedObserver *observer;
+        observer = [SGSpeedObserver new];
+        SGAddPlayerStateObserver(observer);
+    });
 }
 
 #if SG_DRIVER
