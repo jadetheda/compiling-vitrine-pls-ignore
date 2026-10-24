@@ -425,7 +425,15 @@ void SGBatchTranslateURI(NSString *uri, SGBatchTranslationEngine engine, UIWindo
     for (UIWindow *w in menu.viewIfLoaded.window.windowScene.windows) {
         if (!w.hidden && w.windowLevel == UIWindowLevelNormal) { window = w; break; }
     }
-    if (!window) window = UIApplication.sharedApplication.windows.firstObject;
+    if (!window) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:UIWindowScene.class]) continue;
+            for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                if (!w.hidden && w.windowLevel == UIWindowLevelNormal) { window = w; break; }
+            }
+            if (window) break;
+        }
+    }
     
     NSString *targetLang = SGLyricsTranslationTarget();
     BOOL onDevice = SGFlag(SGKeyLyricsTranslateOnDevice, YES) && SGOnDeviceTranslation.translationAvailable;
