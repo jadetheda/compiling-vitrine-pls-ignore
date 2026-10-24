@@ -135,7 +135,23 @@ static NSString *geminiAnswer(NSDictionary *reply, NSString *speaker, NSString *
     NSString *finished = string(dig(reply, @[@"candidates", @0, @"finishReason"]));
     if (blocked) *stopped = geminiStop(blocked, speaker);
     else if (finished && ![finished isEqualToString:@"STOP"]) *stopped = geminiStop(finished, speaker);
-    return *stopped ? nil : string(dig(reply, @[@"candidates", @0, @"content", @"parts", @0, @"text"]));
+    if (*stopped) return nil;
+    NSArray *parts = dig(reply, @[@"candidates", @0, @"content", @"parts"]);
+    if (![parts isKindOfClass:NSArray.class]) return nil;
+    for (id part in parts) {
+        if ([part isKindOfClass:NSDictionary.class]) {
+            NSNumber *thought = part[@"thought"];
+            if (thought && [thought boolValue]) continue;
+            NSString *t = string(part[@"text"]);
+            if (t.length) return t;
+        }
+    }
+    for (NSInteger i = (NSInteger)parts.count - 1; i >= 0; i--) {
+        id part = parts[i];
+        NSString *t = string(part[@"text"]);
+        if (t.length) return t;
+    }
+    return nil;
 }
 
 // A server URL as typed or stored: http or https with a host, no user, password or query (which could carry a
@@ -618,10 +634,34 @@ static NSDictionary *batchMapIn(NSString *text) {
             parsed = [NSJSONSerialization JSONObjectWithData:[inner dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
         }
     }
+    if (!parsed) {
+        NSRange open = [text rangeOfString:@"["];
+        NSRange close = [text rangeOfString:@"]" options:NSBackwardsSearch];
+        if (open.location != NSNotFound && close.location != NSNotFound && close.location > open.location) {
+            NSString *inner = [text substringWithRange:NSMakeRange(open.location, close.location - open.location + 1)];
+            parsed = [NSJSONSerialization JSONObjectWithData:[inner dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+        }
+    }
     if ([parsed isKindOfClass:NSDictionary.class]) {
-        if ([parsed[@"songs"] isKindOfClass:NSDictionary.class]) return parsed[@"songs"];
-        if ([parsed[@"tracks"] isKindOfClass:NSDictionary.class]) return parsed[@"tracks"];
+        for (NSString *key in @[@"songs", @"tracks", @"translations", @"results", @"data"]) {
+            if ([parsed[key] isKindOfClass:NSDictionary.class]) return parsed[key];
+        }
         return parsed;
+    }
+    if ([parsed isKindOfClass:NSArray.class]) {
+        NSMutableDictionary *mapped = [NSMutableDictionary dictionary];
+        for (NSUInteger i = 0; i < [parsed count]; i++) {
+            id item = parsed[i];
+            if ([item isKindOfClass:NSDictionary.class]) {
+                NSString *tID = item[@"track"] ?: item[@"id"] ?: item[@"track_id"] ?: item[@"uri"] ?: @(i).stringValue;
+                id lines = item[@"lines"] ?: item[@"translations"] ?: item[@"translation"];
+                if (lines) mapped[tID] = lines;
+                else mapped[@(i).stringValue] = item;
+            } else if ([item isKindOfClass:NSArray.class]) {
+                mapped[@(i).stringValue] = item;
+            }
+        }
+        return mapped;
     }
     return nil;
 }
@@ -700,14 +740,38 @@ void SGLyricsTranslateBatchWithAI(NSDictionary<NSString *, NSArray<NSString *> *
         
         NSMutableDictionary<NSString *, NSArray<NSString *> *> *results = [NSMutableDictionary dictionary];
         if (rawDict) {
+        if (rawDict) {
+            NSUInteger songIndex = 0;
             for (NSString *trackKey in songs) {
-                NSString *altKey = [trackKey hasPrefix:@"spotify:track:"] ? [trackKey substringFromIndex:@"spotify:track:".length] : [@"spotify:track:" stringByAppendingString:trackKey];
-                id rawLines = rawDict[trackKey] ?: rawDict[altKey];
+                NSString *bareID = [trackKey hasPrefix:@"spotify:track:"] ? [trackKey substringFromIndex:@"spotify:track:".length] : trackKey;
+                NSString *uriID = [@"spotify:track:" stringByAppendingString:bareID];
+                id rawLines = rawDict[trackKey] ?: rawDict[bareID] ?: rawDict[uriID];
+                if (!rawLines) {
+                    for (NSString *k in rawDict) {
+                        if ([k caseInsensitiveCompare:trackKey] == NSOrderedSame ||
+                            [k caseInsensitiveCompare:bareID] == NSOrderedSame ||
+                            [k caseInsensitiveCompare:uriID] == NSOrderedSame) {
+                            rawLines = rawDict[k];
+                            break;
+                        }
+                    }
+                }
+                if (!rawLines) {
+                    rawLines = rawDict[@(songIndex).stringValue];
+                }
+                if ([rawLines isKindOfClass:NSDictionary.class]) {
+                    if ([rawLines[@"lines"] isKindOfClass:NSArray.class]) rawLines = rawLines[@"lines"];
+                    else if ([rawLines[@"translations"] isKindOfClass:NSArray.class]) rawLines = rawLines[@"translations"];
+                }
                 if ([rawLines isKindOfClass:NSArray.class]) {
                     NSMutableArray<NSString *> *clean = [NSMutableArray array];
                     for (id l in rawLines) [clean addObject:[l isKindOfClass:NSString.class] ? l : [l description]];
                     results[trackKey] = clean;
+                    results[bareID] = clean;
                 }
+                songIndex++;
+            }
+        }
             }
         }
         
@@ -1048,6 +1112,7 @@ NSArray<SGModRow *> *SGAITranslatorRows(void) {
         SGPresentDark(nav);
         [SGTopController() presentViewController:nav animated:YES completion:nil];
     });
+<<<<<<< HEAD
     NSArray<NSString *> *thinkingLevels = @[@"Minimal", @"Low", @"Medium", @"High"];
     SGModRow *thinking = SGMenuRow(@"Thinking", thinkingLevels, ^NSString *{
         NSString *level = [NSUserDefaults.standardUserDefaults stringForKey:SGKeyLyricsGeminiThinking];
@@ -1070,26 +1135,5 @@ NSArray<SGModRow *> *SGAITranslatorRows(void) {
         else [NSUserDefaults.standardUserDefaults setInteger:timeoutSeconds[index].integerValue forKey:SGKeyLyricsAITimeout];
     });
 
-    NSArray<NSString *> *batchSizeOptions = @[@"3 songs", @"5 songs (recommended)", @"8 songs", @"10 songs", @"All at once (Single prompt)"];
-    SGModRow *batchSizeRow = SGMenuRow(@"Songs per batch", batchSizeOptions, ^NSString *{
-        NSUInteger size = SGLyricsBatchSize();
-        if (size == 0) return @"All at once (Single prompt)";
-        if (size == 3) return @"3 songs";
-        if (size == 8) return @"8 songs";
-        if (size == 10) return @"10 songs";
-        return @"5 songs (recommended)";
-    }, ^(NSInteger index) {
-        NSUInteger size = (index == 0) ? 3 : ((index == 1) ? 5 : ((index == 2) ? 8 : ((index == 3) ? 10 : 0)));
-        if (size == 5) [NSUserDefaults.standardUserDefaults removeObjectForKey:SGKeyLyricsBatchSize];
-        else [NSUserDefaults.standardUserDefaults setInteger:size forKey:SGKeyLyricsBatchSize];
-    });
-    SGModRow *batchPromptRow = SGStatActionRow(@"Batch prompt", @"Prompt used when translating multiple songs at once",
-                                               ^NSString *{ return storedString(SGKeyLyricsBatchPrompt) ? @"Edited" : @"Default"; }, ^{
-        UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:[SGBatchPromptEditor new]];
-        nav.modalPresentationStyle = UIModalPresentationPageSheet;
-        SGPresentDark(nav);
-        [SGTopController() presentViewController:nav animated:YES completion:nil];
-    });
-    SGModRow *skipSavedRow = SGSwitchRow(@"Skip saved translations", @"Skip songs that already have a saved translation", SGKeyLyricsBatchSkipSaved);
     return @[provider, key, models, thinking, timeout, prompt, batchSizeRow, batchPromptRow, skipSavedRow];
 }
