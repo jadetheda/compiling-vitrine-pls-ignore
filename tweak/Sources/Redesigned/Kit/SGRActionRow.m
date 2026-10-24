@@ -395,7 +395,7 @@ static BOOL indicatorOn(UIView *button, BOOL *found) {
 }
 
 - (void)sgr_tap {
-    if ([self.source.accessibilityIdentifier hasPrefix:SGAlbumQueueButtonPrefix]) SGAlbumQueueMarkSource(self.source);
+    if ([self.source.accessibilityIdentifier hasPrefix:@"Components.UI.ContextMenuButton"]) SGAlbumQueueMarkSource(self.source);
     SGRActivate(self.source);
     // The word is watched where Spotify writes it, but a button that rebuilds its content on the state it
     // just took writes the new word into a label the watch has never seen. So a tap, and only a tap, asks
@@ -449,6 +449,7 @@ SGRMirrorButton *SGRPinnedMoreRecentButton(void) {
     sg_morePage = button.superview;
     sg_moreButton = button;
     sg_moreTappedAt = CACurrentMediaTime();
+    SGAlbumQueueMarkSource(button.superview);
 }
 @end
 
