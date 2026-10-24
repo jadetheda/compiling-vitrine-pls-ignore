@@ -115,8 +115,9 @@ static __weak SGAlbumQueueNotice *sg_notice;
     window = activeWindow(window);
     if (!window) return;
 
-    if (sg_notice && !sg_notice->_leaving && sg_notice.superview) {
-        [sg_notice updateTitle:title detail:detail symbol:symbol persistent:persistent];
+    SGAlbumQueueNotice *existing = sg_notice;
+    if (existing && !existing->_leaving && existing.superview) {
+        [existing updateTitle:title detail:detail symbol:symbol persistent:persistent];
         return;
     }
 
@@ -132,7 +133,8 @@ static __weak SGAlbumQueueNotice *sg_notice;
         NSTimeInterval stay = detail ? 2.5 : 4;
         __weak SGAlbumQueueNotice *weakNotice = notice;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(stay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (weakNotice && weakNotice->_generation == gen) [weakNotice leave:0];
+            SGAlbumQueueNotice *strongNotice = weakNotice;
+            if (strongNotice && strongNotice->_generation == gen) [strongNotice leave:0];
         });
     }
 }
@@ -174,7 +176,8 @@ static __weak SGAlbumQueueNotice *sg_notice;
         NSTimeInterval stay = detail ? 2.5 : 4;
         __weak SGAlbumQueueNotice *weakNotice = self;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(stay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (weakNotice && weakNotice->_generation == gen) [weakNotice leave:0];
+            SGAlbumQueueNotice *strongNotice = weakNotice;
+            if (strongNotice && strongNotice->_generation == gen) [strongNotice leave:0];
         });
     }
 }
