@@ -122,7 +122,8 @@ static _Atomic(Output *) sg_music;           // the output carrying the processo
 static pthread_mutex_t sg_outputsLock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
 static dispatch_queue_t sg_outputsQueue;
 static SGPlayerOutputWatcher sg_watchers[kMaxWatchers];
-static BOOL sg_reachable;                    // Spotify's AudioOutputUnitStart could be rebound
+static atomic_bool sg_reachable;                    // Spotify's AudioOutputUnitStart could be rebound
+static pthread_mutex_t sg_rebindLock = PTHREAD_MUTEX_INITIALIZER;
 
 // The unit in use and whether the render thread runs it: in the music's chain (pull), else in place (pitch only).
 static _Atomic(SGTimePitch *) sg_pull, sg_inPlace;
@@ -1098,7 +1099,7 @@ float SGPlayerPitch(void) {
 }
 
 void SGSetPlayerPitch(float semitones) {
-    if (!sg_reachable && !tapped()) return;
+    if (!atomic_load(&sg_reachable) && !tapped()) return;
     sg_semitones = semitones;
     apply();
 }
@@ -1115,11 +1116,11 @@ void SGSetPlayerPitchFollowsSpeed(BOOL follows) {
 }
 
 BOOL SGPlayerPitchAvailable(void) {
-    return sg_reachable || tapped();
+    return atomic_load(&sg_reachable) || tapped();
 }
 
 void SGPlayerSetGain(float gain) {
-    if (!sg_reachable) {
+    if (!atomic_load(&sg_reachable)) {
         static int logged;
         if (logged++ < 1) SGLog(@"audio: Spotify's output was not reached, the gain cannot apply");
     }
@@ -1140,40 +1141,60 @@ BOOL SGPlayerMusicClientFormat(AudioStreamBasicDescription *format) {
     return read;
 }
 
-static void rebind(void) {
+static void setupOutputsQueue(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         mach_timebase_info_data_t timebase;
         mach_timebase_info(&timebase);
         sg_secondsPerTick = (double)timebase.numer / timebase.denom / 1e9;
         sg_outputsQueue = dispatch_queue_create("spotifyglass.outputs", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
-        if (!SGRebindImport("AudioUnitSetProperty", setProperty, (void **)&sg_setProperty) || !sg_setProperty) {
+    });
+}
+
+static void rebind(void) {
+    setupOutputsQueue();
+    if (atomic_load(&sg_reachable)) return;
+    pthread_mutex_lock(&sg_rebindLock);
+    if (!atomic_load(&sg_reachable)) {
+        if (!sg_setProperty && (!SGRebindImport("AudioUnitSetProperty", setProperty, (void **)&sg_setProperty) || !sg_setProperty)) {
             sg_setProperty = NULL;
             SGLog(@"redesign speed: Spotify does not import AudioUnitSetProperty, the menu offers pitch only");
         }
-        sg_reachable = SGRebindImport("AudioOutputUnitStart", startOutput, (void **)&sg_startOutput) && sg_startOutput;
-        if (!sg_reachable) {
-            SGLog(@"audio: Spotify does not import AudioOutputUnitStart, its output cannot be reached");
-            return;
+        BOOL reached = SGRebindImport("AudioOutputUnitStart", startOutput, (void **)&sg_startOutput) && sg_startOutput;
+        if (!sg_startOutput) sg_startOutput = AudioOutputUnitStart;
+        if (!sg_stopOutput && (!SGRebindImport("AudioOutputUnitStop", stopOutput, (void **)&sg_stopOutput) || !sg_stopOutput)) {
+            sg_stopOutput = AudioOutputUnitStop;
         }
-        if (!SGRebindImport("AudioOutputUnitStop", stopOutput, (void **)&sg_stopOutput) || !sg_stopOutput) sg_stopOutput = AudioOutputUnitStop;
-        if (!SGRebindImport("AudioComponentInstanceDispose", disposeUnit, (void **)&sg_dispose) || !sg_dispose) {
+        if (!sg_dispose && (!SGRebindImport("AudioComponentInstanceDispose", disposeUnit, (void **)&sg_dispose) || !sg_dispose)) {
             sg_dispose = AudioComponentInstanceDispose;
             SGLog(@"audio: Spotify does not import AudioComponentInstanceDispose, a disposed output is not seen");
         }
-    });
+        if (reached) {
+            atomic_store(&sg_reachable, true);
+        } else {
+            SGLog(@"audio: Spotify does not import AudioOutputUnitStart, its output cannot be reached");
+        }
+    }
+    pthread_mutex_unlock(&sg_rebindLock);
+}
+
+BOOL SGPlayerOutputReachable(void) {
+    if (!atomic_load(&sg_reachable)) rebind();
+    return atomic_load(&sg_reachable);
 }
 
 BOOL SGPlayerWatchMusicOutput(SGPlayerOutputWatcher watcher) {
     rebind();
+    if (!watcher) return atomic_load(&sg_reachable);
     pthread_mutex_lock(&sg_outputsLock);
+    int slot = -1;
     for (int i = 0; i < kMaxWatchers; i++) {
-        if (sg_watchers[i]) continue;
-        sg_watchers[i] = watcher;
-        break;
+        if (sg_watchers[i] == watcher) { slot = -1; break; }
+        if (slot < 0 && !sg_watchers[i]) slot = i;
     }
+    if (slot >= 0) sg_watchers[slot] = watcher;
     pthread_mutex_unlock(&sg_outputsLock);
-    return sg_reachable;
+    return atomic_load(&sg_reachable);
 }
 
 #pragma mark - Spotify's clock

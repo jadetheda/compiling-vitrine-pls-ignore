@@ -586,6 +586,7 @@ NSString *SGDSPStatus(void) {
     if (!SGDSPSwitch(SGKeyDSP)) return @"Off";
     if (atomic_load(&sg_outputState) == SGOutputUnsupported) return @"Spotify's output is in a format the engine does not take";
     SGDSPEngine *engine = atomic_load(&sg_engine);
+    if (!sg_reachable) sg_reachable = SGPlayerOutputReachable();
     if (!sg_reachable) return @"Unavailable: Spotify's output could not be reached";
     if (!engine || !atomic_load(&sg_running)) return @"Waiting for Spotify to play";
     double rate = SGDSPEngineSampleRate(engine);
@@ -624,8 +625,8 @@ static void followRoute(void) {
     });
     sg_reachable = SGPlayerWatchMusicOutput(listenTo);
     if (!sg_reachable) {
-        SGLog(@"dsp: Spotify's output cannot be reached, the effects cannot reach its sound");
-        return;
+        SGLog(@"dsp: Spotify's output cannot be reached yet, will retry on demand");
+    } else {
+        SGLog(@"dsp: listening for Spotify's output unit (%@)", SGDSPSwitch(SGKeyDSP) ? @"on" : @"off");
     }
-    SGLog(@"dsp: listening for Spotify's output unit (%@)", SGDSPSwitch(SGKeyDSP) ? @"on" : @"off");
 }

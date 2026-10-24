@@ -624,6 +624,7 @@ SGSingState SGSingCurrentState(void) {
     if (!separatorNow()) return SGSingStatePreparing;
     // Spotify plays and Speed and pitch never took its output over: the stage, and so Sing, never runs.
     if (!atomic_load(&sg_staged) && atomic_load(&sg_outputStarted) && !SGPlayerSpeedAllowed()) return SGSingStateFailed;
+    if (!sg_outputReachable) sg_outputReachable = SGPlayerOutputReachable();
     if (!sg_outputReachable || (atomic_load(&sg_staged) && atomic_load(&sg_formatRefused) && !atomic_load(&sg_formatTaken))) return SGSingStateFailed;
     SGSingEngineStats stats = SGSingEngineReadStats(engine);
     if (!atomic_load(&sg_staged) || stats.lead < 0.05) return SGSingStateWaiting;
@@ -741,6 +742,7 @@ NSString *SGSingStatusDetail(void) {
             NSString *error = SGSingLoaderError() ?: (engine ? SGSingEngineError(engine) : sg_setupError);
             if (SGSingLoaderError()) return [error stringByAppendingString:@" Switch Karaoke off and on again to try again."];
             if (error) return error;
+            if (!sg_outputReachable) sg_outputReachable = SGPlayerOutputReachable();
             if (!sg_outputReachable) return @"Spotify's output could not be reached.";
             if (!atomic_load(&sg_staged) && !SGPlayerSpeedAllowed()) return @"Spotify's output could not be taken over, so Karaoke cannot reach its sound.";
             return @"Spotify's output is not 44.1 kHz stereo, which the voice model needs, so the song plays as it is.";
