@@ -779,7 +779,9 @@ void SGLyricsTranslateBatchWithAI(NSDictionary<NSString *, NSArray<NSString *> *
         if (results.count > 0) {
             // Success
         } else if (error) {
-            problem = [NSString stringWithFormat:@"%@ could not be reached.", who];
+            problem = error.code == NSURLErrorTimedOut
+                ? [NSString stringWithFormat:@"%@ timed out. Try Minimal thinking or a longer timeout.", who]
+                : [NSString stringWithFormat:@"%@ could not be reached.", who];
         } else if (status == 401 || status == 403) {
             problem = [NSString stringWithFormat:@"%@ turned the key down. Check it on the Lyrics page.", who];
         } else if (status == 429) {
