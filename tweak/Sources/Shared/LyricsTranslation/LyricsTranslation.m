@@ -53,12 +53,34 @@ static NSString *string(id value) {
     return [value isKindOfClass:NSString.class] ? value : nil;
 }
 
+static NSTimeInterval aiTimeout(void) {
+    NSInteger seconds = [NSUserDefaults.standardUserDefaults integerForKey:SGKeyLyricsAITimeout];
+    return seconds > 0 ? (NSTimeInterval)seconds : 120.0;
+}
+
+static NSURLSession *aiSession(void) {
+    @synchronized (NSURLSession.class) {
+        static NSURLSession *session;
+        static NSTimeInterval lastTimeout = 0;
+        NSTimeInterval timeout = aiTimeout();
+        if (!session || timeout != lastTimeout) {
+            if (session) [session finishTasksAndInvalidate];
+            lastTimeout = timeout;
+            NSURLSessionConfiguration *config = [NSURLSessionConfiguration defaultSessionConfiguration];
+            config.timeoutIntervalForRequest = timeout;
+            config.timeoutIntervalForResource = timeout;
+            session = [NSURLSession sessionWithConfiguration:config];
+        }
+        return session;
+    }
+}
+
 static NSMutableURLRequest *post(NSString *url, NSDictionary *body) {
     NSURL *endpoint = url ? [NSURL URLWithString:url] : nil;
     if (!endpoint) return nil;
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:endpoint];
     request.HTTPMethod = @"POST";
-    request.timeoutInterval = 60;
+    request.timeoutInterval = aiTimeout();
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
     return request;
@@ -68,6 +90,11 @@ static NSMutableURLRequest *post(NSString *url, NSDictionary *body) {
 static NSDictionary *linesSchema(void) {
     return @{@"type": @"object", @"properties": @{@"lines": @{@"type": @"array", @"items": @{@"type": @"string"}}},
              @"required": @[@"lines"], @"additionalProperties": @NO};
+}
+
+static NSString *geminiThinkingLevel(void) {
+    NSString *stored = [NSUserDefaults.standardUserDefaults stringForKey:SGKeyLyricsGeminiThinking];
+    return stored.length ? stored.lowercaseString : @"minimal";
 }
 
 // Gemini: generateContent, the key in x-goog-api-key, a bare array forced by responseSchema.
@@ -83,7 +110,7 @@ static NSMutableURLRequest *geminiRequest(NSString *model, NSString *prompt, NSS
                                      @"responseSchema": @{@"type": @"ARRAY", @"items": @{@"type": @"STRING"}}} mutableCopy];
     // Gemini 3 thinks at length by default, which a whole song's translation does not need and which made it
     // slow enough to time out. Plain: a model named in Other… that does not know the field.
-    if (!plain) config[@"thinkingConfig"] = @{@"thinkingLevel": @"low"};
+    if (!plain) config[@"thinkingConfig"] = @{@"thinkingLevel": geminiThinkingLevel()};
     NSMutableURLRequest *request = post([NSString stringWithFormat:@"https://generativelanguage.googleapis.com/v1beta/models/%@:generateContent", model],
                                         @{@"contents": @[@{@"parts": @[@{@"text": prompt}]}], @"safetySettings": safety, @"generationConfig": config});
     [request setValue:key forHTTPHeaderField:@"x-goog-api-key"];
@@ -185,7 +212,7 @@ static const SGAIProvider kProviders[] = {
      @"Answer with a JSON array of the {count} translations as strings.",
      // A pinned id first, the one users report working. gemini-flash-latest follows each Flash release, preview
      // ones included, with notice only by email to the key's owner, so it is offered but not the default.
-     {@"gemini-3.6-flash", @"gemini-3.5-flash-lite", @"gemini-flash-latest"}, {@"3.6 Flash", @"3.5 Flash-Lite", @"Flash (latest)"},
+     {@"gemini-3.8-flash", @"gemini-3.5-flash-lite", @"gemini-flash-latest"}, {@"3.8 Flash", @"3.5 Flash-Lite", @"Flash (latest)"},
      YES, {@"thinking"}, geminiRequest, geminiAnswer},
     {@"openai", @"OpenAI-compatible", nil, @"Vitrine.OpenAI",
      @"Sends the song's lyrics to the server below: OpenAI's own unless you name another, such as OpenRouter, or an "
@@ -390,7 +417,9 @@ NSArray<NSString *> *SGAITranslationsIn(NSString *provider, id root, NSInteger s
     // {"error": {"message": ...}} from all three; a bare string from some compatible servers.
     NSString *says = string(dig(reply, @[@"error", @"message"])) ?: string(reply[@"error"]);
     if (error) {
-        *problem = [NSString stringWithFormat:@"%@ could not be reached.", who];
+        *problem = error.code == NSURLErrorTimedOut
+            ? [NSString stringWithFormat:@"%@ timed out. Try a longer timeout on the Lyrics page.", who]
+            : [NSString stringWithFormat:@"%@ could not be reached.", who];
     } else if (status == 401 || status == 403 || (status == 400 && [says localizedCaseInsensitiveContainsString:@"API key"])) {
         *problem = [NSString stringWithFormat:@"%@ turned the key down. Check it on the Lyrics page.", who];
     } else if (status == 400 || status == 404) {
@@ -418,7 +447,7 @@ NSArray<NSString *> *SGAITranslationsIn(NSString *provider, id root, NSInteger s
 // out is not asked again. plain is the same request without the optional fields, sent once if a 400 names one.
 static void send(const SGAIProvider *p, NSURLRequest *request, NSURLRequest *plain, NSUInteger attempt,
                  void (^finished)(NSData *data, NSInteger status, NSError *error)) {
-    [[NSURLSession.sharedSession dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+    [[aiSession() dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSInteger status = [response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)response).statusCode : 0;
         NSString *reply = status == 400 && data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
         for (NSUInteger i = 0; plain && reply && i < 4 && p->plainWhen[i]; i++) {
@@ -744,5 +773,27 @@ NSArray<SGModRow *> *SGAITranslatorRows(void) {
         SGPresentDark(nav);
         [SGTopController() presentViewController:nav animated:YES completion:nil];
     });
-    return @[provider, key, models, prompt];
+    NSArray<NSString *> *thinkingLevels = @[@"Minimal", @"Low", @"Medium", @"High"];
+    SGModRow *thinking = SGMenuRow(@"Thinking", thinkingLevels, ^NSString *{
+        NSString *level = [NSUserDefaults.standardUserDefaults stringForKey:SGKeyLyricsGeminiThinking];
+        return level.length ? level.capitalizedString : @"Minimal";
+    }, ^(NSInteger index) {
+        if (index == 0) [NSUserDefaults.standardUserDefaults removeObjectForKey:SGKeyLyricsGeminiThinking];
+        else [NSUserDefaults.standardUserDefaults setObject:thinkingLevels[index].lowercaseString forKey:SGKeyLyricsGeminiThinking];
+    });
+    thinking.visible = ^{ return [chosen()->tag isEqualToString:@"gemini"]; };
+
+    NSArray<NSString *> *timeouts = @[@"30 s", @"60 s", @"90 s", @"120 s", @"180 s", @"240 s", @"300 s"];
+    NSArray<NSNumber *> *timeoutSeconds = @[@30, @60, @90, @120, @180, @240, @300];
+    SGModRow *timeout = SGMenuRow(@"Timeout", timeouts, ^NSString *{
+        NSInteger seconds = [NSUserDefaults.standardUserDefaults integerForKey:SGKeyLyricsAITimeout];
+        if (seconds <= 0) seconds = 120;
+        NSUInteger idx = [timeoutSeconds indexOfObject:@(seconds)];
+        return idx != NSNotFound ? timeouts[idx] : [NSString stringWithFormat:@"%ld s", (long)seconds];
+    }, ^(NSInteger index) {
+        if (index == 3) [NSUserDefaults.standardUserDefaults removeObjectForKey:SGKeyLyricsAITimeout];
+        else [NSUserDefaults.standardUserDefaults setInteger:timeoutSeconds[index].integerValue forKey:SGKeyLyricsAITimeout];
+    });
+
+    return @[provider, key, models, thinking, timeout, prompt];
 }
