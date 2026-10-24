@@ -516,7 +516,7 @@ void SGBatchTranslateURI(NSString *uri, SGBatchTranslationEngine engine, UIWindo
         [items addObject:action];
     }
     if (!onDevice && !intelligence && !ai) {
-        UIAction *action = [UIAction actionWithTitle:@"No Translator Configured" image:[UIImage systemImageNamed:@"exclamationmark.circle"] identifier:nil handler:nil];
+        UIAction *action = [UIAction actionWithTitle:@"No Translator Configured" image:[UIImage systemImageNamed:@"exclamationmark.circle"] identifier:nil handler:^(UIAction *a) {}];
         action.attributes = UIMenuElementAttributesDisabled;
         action.subtitle = @"Add an API key in Vitrine Settings";
         [items addObject:action];
