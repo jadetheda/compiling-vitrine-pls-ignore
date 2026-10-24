@@ -740,7 +740,6 @@ void SGLyricsTranslateBatchWithAI(NSDictionary<NSString *, NSArray<NSString *> *
         
         NSMutableDictionary<NSString *, NSArray<NSString *> *> *results = [NSMutableDictionary dictionary];
         if (rawDict) {
-        if (rawDict) {
             NSUInteger songIndex = 0;
             for (NSString *trackKey in songs) {
                 NSString *bareID = [trackKey hasPrefix:@"spotify:track:"] ? [trackKey substringFromIndex:@"spotify:track:".length] : trackKey;
@@ -770,8 +769,6 @@ void SGLyricsTranslateBatchWithAI(NSDictionary<NSString *, NSArray<NSString *> *
                     results[bareID] = clean;
                 }
                 songIndex++;
-            }
-        }
             }
         }
         
