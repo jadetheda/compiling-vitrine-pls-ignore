@@ -4,6 +4,7 @@
 BOOL SGAlbumQueueIsAlbumURI(NSString *uri);
 BOOL SGIsPlaylistURI(NSString *uri);
 BOOL SGIsValidEntityURI(NSString *uri);
+NSString *SGSanitizeEntityURI(NSString *raw);
 
 // The confirmation notice shown under the Dynamic Island.
 @interface SGAlbumQueueNotice : UIView

@@ -24,8 +24,6 @@ NSArray<SGModRow *> *SGOnDeviceTranslatorRows(void);
 // is kept in the Keychain beside its key, not here. All read at each translation.
 #define SGKeyAITranslator @"spotifyglass.lyrics.ai"
 #define SGKeyAIPrompt @"spotifyglass.lyrics.prompt"
-#define SGKeyAITranslator @"spotifyglass.lyrics.ai"
-#define SGKeyAIPrompt @"spotifyglass.lyrics.prompt"
 #define SGKeyLyricsGeminiThinking @"spotifyglass.lyrics.gemini.thinking"
 #define SGKeyLyricsAITimeout @"spotifyglass.lyrics.ai.timeout"
 #define SGKeyLyricsBatchPrompt @"spotifyglass.lyrics.batch.prompt"
