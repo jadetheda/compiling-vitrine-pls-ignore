@@ -83,8 +83,6 @@ static BOOL hasNativeQueueRow(UITableView *table) {
 // The outcome as a glass capsule under the Dynamic Island, the way the system confirms an action.
 // It materializes on a critically damped spring, leaves the way it came, and a tap or an upward
 // swipe sends it off early. VoiceOver hears the same words.
-@interface SGAlbumQueueNotice : UIView
-@end
 @implementation SGAlbumQueueNotice {
     UIVisualEffectView *_glass;
     CGFloat _restY;
