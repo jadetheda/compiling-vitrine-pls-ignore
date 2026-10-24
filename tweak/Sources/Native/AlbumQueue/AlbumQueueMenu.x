@@ -34,6 +34,6 @@ static BOOL isMenuButton(UIControl *control) {
 %end
 
 %ctor {
-    if (!SGNativeUI() || !SGHidden(SGKeyFakePremium)) return;
+    if (!SGNativeUI()) return;
     %init;
 }
