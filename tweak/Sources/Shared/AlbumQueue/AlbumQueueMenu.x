@@ -1,5 +1,6 @@
 #import "Core/SGCore.h"
 #import "Shared/AdBlock/AdBlock.h"
+#import "Shared/LyricsTranslation/BatchTranslation.h"
 #import "AlbumQueue.h"
 
 @interface SGAlbumQueuePage : NSObject
@@ -43,6 +44,7 @@ static NSString *SGAlbumQueueURIForView(UIView *view) {
 void SGAlbumQueueMarkSource(UIView *view) {
     sg_pending = SGAlbumQueueURIForView(view);
     sg_markedAt = CACurrentMediaTime();
+    SGBatchTranslationMarkSource(view);
 }
 
 static UITableView *tableIn(UIView *view, NSUInteger depth) {
@@ -81,8 +83,6 @@ static BOOL hasNativeQueueRow(UITableView *table) {
 // The outcome as a glass capsule under the Dynamic Island, the way the system confirms an action.
 // It materializes on a critically damped spring, leaves the way it came, and a tap or an upward
 // swipe sends it off early. VoiceOver hears the same words.
-@interface SGAlbumQueueNotice : UIView
-@end
 @implementation SGAlbumQueueNotice {
     UIVisualEffectView *_glass;
     CGFloat _restY;
@@ -279,7 +279,6 @@ void SGAlbumQueueInstall(UIViewController *menu) {
     }
     if (native.boolValue) return;
     SGAlbumQueueRow *row = objc_getAssociatedObject(menu, &kRowKey);
-    if (table.tableFooterView && table.tableFooterView != row && table.tableFooterView.bounds.size.height > 0) return;
     if (!row) {
         row = [[SGAlbumQueueRow alloc] initWithFrame:CGRectZero];
         row.menu = menu;
@@ -288,17 +287,51 @@ void SGAlbumQueueInstall(UIViewController *menu) {
     }
     row.uri = uri;
     CGFloat height = MAX(56, [UIFont preferredFontForTextStyle:UIFontTextStyleBody].lineHeight + 24);
-    CGSize size = CGSizeMake(table.bounds.size.width, height);
-    // The table moves its footer to the end of the content, so only the size says whether it changed.
-    if (table.tableFooterView != row || !CGSizeEqualToSize(row.bounds.size, size)) {
-        // Outside the sheet's rise, or the row slides down over Spotify's rows from the table's top.
+    CGFloat width = table.bounds.size.width;
+    UIView *existing = table.tableFooterView;
+    if (existing == row) {
+        if (!CGSizeEqualToSize(row.bounds.size, CGSizeMake(width, height))) {
+            [UIView performWithoutAnimation:^{
+                row.frame = CGRectMake(0, 0, width, height);
+                table.tableFooterView = row;
+                [table invalidateIntrinsicContentSize];
+                [table layoutIfNeeded];
+            }];
+        }
+        return;
+    }
+    if (existing && [existing.subviews containsObject:row]) return;
+    if (existing && existing.bounds.size.height > 0) {
+        UIView *container = [[UIView alloc] initWithFrame:CGRectMake(0, 0, width, existing.bounds.size.height + height)];
+        container.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+        CGFloat y = 0;
+        row.frame = CGRectMake(0, y, width, height);
+        y += height;
+        [container addSubview:row];
+        for (UIView *sub in existing.subviews) {
+            sub.frame = CGRectMake(0, y, width, sub.bounds.size.height);
+            y += sub.bounds.size.height;
+            [container addSubview:sub];
+        }
+        if (existing.subviews.count == 0 && [existing isKindOfClass:UIControl.class]) {
+            existing.frame = CGRectMake(0, y, width, existing.bounds.size.height);
+            y += existing.bounds.size.height;
+            [container addSubview:existing];
+        }
+        container.frame = CGRectMake(0, 0, width, y);
         [UIView performWithoutAnimation:^{
-            row.frame = (CGRect){CGPointZero, size};
-            table.tableFooterView = row;
+            table.tableFooterView = container;
             [table invalidateIntrinsicContentSize];
             [table layoutIfNeeded];
         }];
+        return;
     }
+    [UIView performWithoutAnimation:^{
+        row.frame = CGRectMake(0, 0, width, height);
+        table.tableFooterView = row;
+        [table invalidateIntrinsicContentSize];
+        [table layoutIfNeeded];
+    }];
 }
 
 %hook _TtC24ContextMenu_InternalImpl25ContextMenuViewController
