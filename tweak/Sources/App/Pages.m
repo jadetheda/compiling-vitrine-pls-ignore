@@ -159,9 +159,11 @@ UIViewController *SGPlayerSettingsPage(void) {
     }
     // Switch to video is the same chip of Spotify's player under either look.
     SGModRow *video = SGHideRow(@"Switch to video", @"The chip over the title of a song with a music video", SGKeyHideVideoSwitch);
+    // Spotify's own, under either look: a tap on the cover opens it full screen, where it turns a little with the phone.
+    SGModRow *tilt = SGHideRow(@"Full screen cover", @"What a tap on the cover opens", SGKeyHideFullScreenCover);
     // The native look's Shuffle and Repeat rows are in its Hide on the player section, with their own keys.
-    NSArray<SGModRow *> *hidden = native ? @[video]
-        : @[SGHideRow(@"Shuffle", nil, SGRKeyPlayerHideShuffle), SGHideRow(@"Repeat", nil, SGRKeyPlayerHideRepeat), video];
+    NSArray<SGModRow *> *hidden = native ? @[video, tilt]
+        : @[SGHideRow(@"Shuffle", nil, SGRKeyPlayerHideShuffle), SGHideRow(@"Repeat", nil, SGRKeyPlayerHideRepeat), video, tilt];
     [sections addObject:SGSection(native ? nil : @"Hide on the player", hidden)];
 
     [sections addObject:SGNotedSection(@"Lossless", @[

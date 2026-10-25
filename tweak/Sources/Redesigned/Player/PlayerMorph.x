@@ -69,6 +69,8 @@ static CGFloat screenRadius(void) {
 
 @interface SGRPlayerMorph : NSObject
 @property (nonatomic, readonly) CGFloat restY;
+@property (nonatomic, readonly) CGRect card;
+@property (nonatomic, readonly) BOOL masksStrip;
 @end
 
 @implementation SGRPlayerMorph {
@@ -76,10 +78,16 @@ static CGFloat screenRadius(void) {
     UIView *_sheet;
     UIImageView *_cover;
     CALayer *_mask;
+    // In a Jam (follow mode only): the mask on the stand-in or its picture, its strip part fading on the way open, and
+    // a close's copy of the strip's glass, which fades by alpha.
+    CALayer *_stripMask, *_stripPart;
+    __weak UIView *_masked, *_stripPane;
+    CGFloat _stripPaneAlpha;
     CGRect _card, _barArtwork, _barRest, _spotifyFrame;
     CGFloat _cardRadius, _spotifyAlpha;
     CGColorRef _overlayColor;
     BOOL _coverHidden;
+    BOOL _tornDown;
     BOOL _follows;   // 9.1.90: Spotify animates the player's frame and alpha, which the morph then only reads
 }
 
@@ -92,8 +100,66 @@ static CGFloat screenRadius(void) {
 // 9.1.90's CompactOverlayTransition animates the player itself, so the morph follows where it is drawn. Spotify also
 // crossfades its bar stand-in with the player at each end, on the render server, so the bar is in its place the moment
 // the card lands even when the main thread stalls; the stand-in is left to Spotify.
-- (void)follow {
+- (void)followFrom:(UIView *)source {
     _follows = YES;
+    // Next turn, once every hook on the transition's start has run: a close's glass copies (BarTransition.x) exist by
+    // then whichever hook runs first. At either end the strip sits in the stand-in at Spotify's own alpha, so the turn
+    // without the mask shows nothing new.
+    __weak SGRPlayerMorph *weak = self;
+    __weak UIView *weakSource = source;
+    dispatch_async(dispatch_get_main_queue(), ^{ [weak maskStripFrom:weakSource]; });
+}
+
+- (void)maskStripFrom:(UIView *)source {
+    if (_tornDown || !source) return;
+    // In a Jam the stand-in is the whole bar, strip and card, and the sheet grows from the card alone: the strip fades
+    // in the first quarter of an open, so it never stands beside the growing player. Its place comes from Spotify's bar
+    // the stand-in copies, scaled to the stand-in, not from the card: Spotify has already set the stand-in's end frame.
+    UIView *bar = _bar;
+    CGRect strip = SGRNowPlayingStripFrameIn(source);
+    if (CGRectIsNull(strip) || !bar) return;
+    CGSize from = source.bounds.size, to = bar.bounds.size;
+    CGFloat sx = from.width > 0 ? to.width / from.width : 1, sy = from.height > 0 ? to.height / from.height : 1;
+    strip = CGRectIntersection(CGRectMake(strip.origin.x * sx, strip.origin.y * sy, strip.size.width * sx, strip.size.height * sy), bar.bounds);
+    if (CGRectIsEmpty(strip)) return;
+    // A close's stand-in is a picture over copies of the bar's glass (BarTransition.x), which a mask above them would
+    // break: the mask goes on the picture alone, and the strip's copy of the glass fades by alpha.
+    UIView *masked = bar;
+    if ([bar isKindOfClass:UIImageView.class] && !((UIImageView *)bar).image && [bar.subviews.lastObject isKindOfClass:UIImageView.class]) {
+        masked = bar.subviews.lastObject;
+        for (UIView *pane in bar.subviews) {
+            if (pane != masked && CGRectContainsPoint(strip, CGPointMake(CGRectGetMidX(pane.frame), CGRectGetMidY(pane.frame)))) _stripPane = pane;
+        }
+        _stripPaneAlpha = _stripPane.alpha;
+    }
+    if (masked.layer.mask) {
+        _stripPane = nil;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ SGLog(@"player morph: the bar's stand-in has a mask of its own, the Jam strip is not faded"); });
+        return;
+    }
+    strip = [masked convertRect:strip fromView:bar];
+    // Opaque but for the strip, above or below the card, which its own part covers at the fade's opacity.
+    CAShapeLayer *mask = [CAShapeLayer layer];
+    mask.frame = masked.bounds;
+    UIBezierPath *path = [UIBezierPath bezierPathWithRect:masked.bounds];
+    [path appendPath:[UIBezierPath bezierPathWithRect:strip]];
+    mask.path = path.CGPath;
+    mask.fillRule = kCAFillRuleEvenOdd;
+    _stripPart = [CALayer layer];
+    _stripPart.backgroundColor = UIColor.blackColor.CGColor;
+    _stripPart.frame = strip;
+    [mask addSublayer:_stripPart];
+    _stripMask = mask;
+    _masked = masked;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    masked.layer.mask = mask;
+    [CATransaction commit];
+}
+
+- (BOOL)masksStrip {
+    return _stripMask != nil;
 }
 
 - (instancetype)initWithContainer:(UIView *)container overlay:(UIView *)overlay bar:(UIView *)bar barRest:(CGRect)barRest {
@@ -197,6 +263,11 @@ static CGFloat screenRadius(void) {
             frame.origin.y = self->_barRest.origin.y + rise;
             bar.frame = frame;
             bar.alpha = 1 - ramp(0, 0.25, t);
+        } else if (self->_stripPart) {
+            // Under Spotify's own crossfade of the stand-in, which stays its own.
+            CGFloat strip = 1 - ramp(0, 0.25, t);
+            self->_stripPart.opacity = strip;
+            self->_stripPane.alpha = self->_stripPaneAlpha * strip;
         }
 
         if (self->_cover) {
@@ -230,11 +301,18 @@ static CGFloat screenRadius(void) {
 }
 
 - (void)tearDown {
+    _tornDown = YES;
     UIView *overlay = _overlay;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     overlay.layer.sublayerTransform = CATransform3DIdentity;
     if (overlay.layer.mask == _mask) overlay.layer.mask = nil;
+    UIView *masked = _masked, *pane = _stripPane;
+    if (_stripMask && masked.layer.mask == _stripMask) masked.layer.mask = nil;
+    pane.alpha = _stripPaneAlpha;
+    _stripMask = nil;
+    _stripPart = nil;
+    _stripPane = nil;
     if (!_follows) overlay.alpha = _spotifyAlpha;
     if (overlay && !_follows) overlay.frame = _spotifyFrame;
     if (!overlay.layer.backgroundColor) overlay.layer.backgroundColor = _overlayColor;
@@ -298,7 +376,8 @@ static const float kCloseSpeed = 1.5;         // how much faster than Spotify's 
 @property (nonatomic, weak) id<UIViewControllerContextTransitioning> context;
 @property (nonatomic, strong) CADisplayLink *link;
 @property (nonatomic) NSInteger still;
-@property (nonatomic) CGFloat lastY;
+@property (nonatomic) CGFloat lastY, lastT;
+@property (nonatomic) CGRect npbFrame;   // Spotify's bar frame, for the Jam close log
 @property (nonatomic) CFTimeInterval settledSince;   // when it last moved or was driven by a finger, or began
 @property (nonatomic) CFTimeInterval lastTick;
 @property (nonatomic) BOOL sped;                     // the container's layer runs at kCloseSpeed until let go
@@ -324,7 +403,8 @@ static void runAtSpeed(CALayer *layer, float speed) {
     CGFloat rest = self.morph.restY > 0 ? self.morph.restY : container.bounds.size.height;
     // An open's first frame has no presentation layer yet and its model already holds the end; Spotify starts it at the bar.
     CGFloat y = drawn ? drawn.frame.origin.y : rest;
-    [self.morph apply:rest > 0 ? MIN(1, MAX(0, 1 - y / rest)) : 1];
+    self.lastT = rest > 0 ? MIN(1, MAX(0, 1 - y / rest)) : 1;
+    [self.morph apply:self.lastT];
     BOOL interactive = self.context.isInteractive;
     // A close dragged by a finger runs faster from the moment it is let go.
     if (self.closing && self.wasInteractive && !interactive && !self.sped) {
@@ -352,6 +432,14 @@ static void runAtSpeed(CALayer *layer, float speed) {
     self.link = nil;
     // Back to 1 from where its animations are, so a close Spotify has not finished does not jump back.
     if (self.sped) runAtSpeed(self.container.layer, 1);
+    // Whether a close in a Jam ends at t 0: Spotify parks the player at its bar frame's top, the strip's, and restY is the card's.
+    if (self.closing && self.morph.masksStrip) {
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            SGLog(@"player morph: Jam close ended, npbFrame %@, card %@, restY %.1f, last t %.3f", NSStringFromCGRect(self.npbFrame),
+                  NSStringFromCGRect(self.morph.card), self.morph.restY, self.lastT);
+        });
+    }
     [self.morph tearDown];
     self.morph = nil;
 }
@@ -364,6 +452,26 @@ static id ivarOf(id object, const char *name) {
 
 static char kFollowerKey;
 
+// A CGRect a Swift object keeps, read at its ivar's offset; CGRectNull without that ivar, or when it cannot be a CGRect
+// (an Objective-C type other than one, or too little room in the object), and the class's ivars are then logged once.
+static CGRect rectIvarOf(id object, const char *name) {
+    Class cls = object_getClass(object);
+    Ivar ivar = class_getInstanceVariable(cls, name);
+    const char *type = ivar ? ivar_getTypeEncoding(ivar) : NULL;
+    BOOL fits = ivar && ivar_getOffset(ivar) >= 0 && (size_t)ivar_getOffset(ivar) + sizeof(CGRect) <= class_getInstanceSize(cls);
+    if (fits && (!type || !*type || strncmp(type, "{CGRect", 7) == 0)) return *(CGRect *)((char *)(__bridge void *)object + ivar_getOffset(ivar));
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList(cls, &count);
+        NSMutableString *names = [NSMutableString string];
+        for (unsigned int i = 0; i < count; i++) [names appendFormat:@" %s", ivar_getName(ivars[i])];
+        free(ivars);
+        SGLog(@"player morph: %@ has no CGRect %s, its ivars:%@", cls, name, names);
+    });
+    return CGRectNull;
+}
+
 static void followTransition(id transition, id<UIViewControllerContextTransitioning> context) {
     if (SGRReduceMotion() || !context) return;
     UIView *container = context.containerView;
@@ -375,7 +483,7 @@ static void followTransition(id transition, id<UIViewControllerContextTransition
     [old finish];
     SGRPlayerMorph *morph = [[SGRPlayerMorph alloc] initWithContainer:container overlay:overlay bar:ivarOf(transition, "npbSnapshotView") barRest:CGRectZero];
     if (!morph) return;
-    [morph follow];
+    [morph followFrom:ivarOf(transition, "npbView")];
     ((UIView *)ivarOf(transition, "tabBarSnapshotView")).alpha = 0;
     SGRMorphFollower *follower = [SGRMorphFollower new];
     follower.morph = morph;
@@ -383,6 +491,7 @@ static void followTransition(id transition, id<UIViewControllerContextTransition
     follower.overlay = overlay;
     follower.context = context;
     follower.lastY = CGFLOAT_MAX;
+    if (SGRNowPlayingStripHeight() > 0) follower.npbFrame = rectIvarOf(transition, "npbFrame");
     // A close plays faster: its slide, its stand-ins and so the morph that follows them. One Spotify runs on its own
     // from the start, one dragged by a finger from when it is let go (tick:).
     follower.closing = !to.isBeingPresented;

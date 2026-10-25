@@ -7,14 +7,21 @@
 // controls and the footer): an image drawn in the accent is tinted from its own shape, a background or a shape layer
 // in the accent takes the color, and every original is kept to give back. It paints whenever the cover's color
 // changes and whenever the stack or one of its buttons lays out, which is when Spotify hands a button its new state.
+//
+// The mini player's lit buttons, its device glyph and its like (trees: t-home17e 1916-1945), are painted the same way,
+// those two alone so the cover on the card is never judged: when the cover's color changes, which reaches here with the
+// player never opened (PlayerField.x), when the bar or one of the two buttons lays out, and when the device glyph is
+// handed a new image, which lays nothing out. Only the tab bar's bar (sgr_nowPlayingRoot), not the one on Spotify's sheets.
 #import <objc/runtime.h>
 #import "Core/SGCore.h"
 #import "Redesigned/Kit/SGRKit.h"
+#import "Redesigned/Kit/SGRRepaint.h"
 #import "Player.h"
 
 static NSInteger sg_cover = -1;   // 0xRRGGBB while a cover gives one, else -1
 static __weak UIView *sg_stack;   // the bottom stack last painted
-static char kOriginalKey, kTintedKey, kTintedCoverKey, kAccentImageKey, kInkKey, kOriginalFillKey, kOriginalStrokeKey;
+static char kOriginalKey, kTintedKey, kTintedCoverKey, kAccentImageKey, kInkKey, kOriginalFillKey, kOriginalStrokeKey, kObservedKey;
+static NSString *const kBarConnectId = @"Components.ConnectButtonOutputSwitcher", *const kBarLikeId = @"Components.UI.AddToButton";
 
 BOOL SGRPlayerFollowsCover(void) {
     static BOOL on;
@@ -123,6 +130,12 @@ static void paintImageView(UIImageView *view) {
     UIImage *image = view.image, *tinted = objc_getAssociatedObject(view, &kTintedKey);
     UIImage *original = image == tinted ? objc_getAssociatedObject(view, &kOriginalKey) : image;
     if (!original) return;
+    // A UIButton puts its own image back on every layout pass: the tint made for this cover goes back, not a new one.
+    if (tinted && image != tinted && image == objc_getAssociatedObject(view, &kOriginalKey)
+        && sg_cover >= 0 && [objc_getAssociatedObject(view, &kTintedCoverKey) integerValue] == sg_cover) {
+        view.image = tinted;
+        return;
+    }
     if (sg_cover < 0 || !imageAccentLike(original)) {
         if (image == tinted && tinted) view.image = original;
         objc_setAssociatedObject(view, &kTintedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -224,20 +237,63 @@ static void paintLayers(CALayer *layer) {
     for (CALayer *sublayer in layer.sublayers) paintLayers(sublayer);
 }
 
-void SGRPlayerPaintCover(UIView *stack) {
-    if (!SGRPlayerFollowsCover() || !stack) return;
-    if (stack.superview && [stack isKindOfClass:UIStackView.class]) sg_stack = stack;
+static void paintTree(UIView *root) {
     static Class lottie;
     if (!lottie) lottie = NSClassFromString(@"Lottie.LottieAnimationView");
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    SGForEachView(stack, ^(UIView *view) {
+    SGForEachView(root, ^(UIView *view) {
         if ([view.accessibilityIdentifier isEqualToString:SGRPlainCheckIdentifier]) view.tintColor = sg_cover < 0 ? SGRAccent() : coverColor();
         else if ([view isKindOfClass:UIImageView.class]) paintImageView((UIImageView *)view);
         else if (lottie && [view isKindOfClass:lottie]) paintLayers(view.layer);
         else paintBackground(view);
     });
     [CATransaction commit];
+}
+
+void SGRPlayerPaintCover(UIView *stack) {
+    if (!SGRPlayerFollowsCover() || !stack) return;
+    if (stack.superview && [stack isKindOfClass:UIStackView.class]) sg_stack = stack;
+    paintTree(stack);
+}
+
+static BOOL isBarButton(UIView *view) {
+    NSString *name = view.accessibilityIdentifier;
+    return name && ([name isEqualToString:kBarConnectId] || [name isEqualToString:kBarLikeId]);
+}
+
+// The bar's two buttons, found once per bar and cover and again only when one is gone from it: the bar lays out on
+// every track change, page swipe and Jam strip move, and a walk of its hundred views on each of those was #96's kind
+// of cost. A bar with one of them, or neither (an ad, an episode), is not walked again on each layout either.
+static __weak UIView *sg_barConnect, *sg_barLike, *sg_barSearched;
+
+static BOOL findBarButtons(UIView *bar) {
+    UIView *connect = sg_barConnect, *like = sg_barLike;
+    if (bar == sg_barSearched && (!connect || [connect isDescendantOfView:bar]) && (!like || [like isDescendantOfView:bar]))
+        return connect || like;
+    sg_barSearched = bar;
+    __block UIView *foundConnect = nil, *foundLike = nil;
+    SGForEachView(bar, ^(UIView *view) {
+        NSString *name = view.accessibilityIdentifier;
+        if (!foundConnect && [name isEqualToString:kBarConnectId]) foundConnect = view;
+        else if (!foundLike && [name isEqualToString:kBarLikeId]) foundLike = view;
+    });
+    sg_barConnect = foundConnect;
+    sg_barLike = foundLike;
+    SGForEachView(foundConnect, ^(UIView *inner) {
+        if (![inner isKindOfClass:UIImageView.class] || objc_getAssociatedObject(inner, &kObservedKey)) return;
+        objc_setAssociatedObject(inner, &kObservedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // The tint set back reports too, and stops there: the image is the tint made for this cover.
+        SGRObserveImage((UIImageView *)inner, ^(UIImageView *changed) { paintImageView(changed); });
+    });
+    return foundConnect || foundLike;
+}
+
+static void paintBar(UIView *bar) {
+    if (!bar || !findBarButtons(bar)) return;
+    UIView *connect = sg_barConnect, *like = sg_barLike;
+    if (connect) paintTree(connect);
+    if (like) paintTree(like);
 }
 
 void SGRPlayerSetCoverAccent(UIColor *cover) {
@@ -254,16 +310,29 @@ void SGRPlayerSetCoverAccent(UIColor *cover) {
     sg_cover = rgb;
     SGLog(@"redesign player: follow the cover %@", rgb < 0 ? @"gives the accent back (a gray cover)" : [NSString stringWithFormat:@"paints #%06lX", (long)rgb]);
     SGRPlayerPaintCover(sg_stack);
+    sg_barSearched = nil; // a new cover looks again, for a button the last bar state did not have
+    paintBar(sgr_nowPlayingRoot);
 }
 
-// A button in the player's stack laid out: Spotify hands it a new state's icon or animation this way.
+// A button in the player's stack, or the mini player's device or like button, laid out: Spotify hands it a new state's
+// icon or animation this way.
 %hook UIButton
 - (void)layoutSubviews {
     %orig;
-    UIView *stack = sg_stack;
-    if (stack && (sg_cover >= 0 || objc_getAssociatedObject(self, &kTintedKey)) && [(UIView *)self isDescendantOfView:stack]) {
-        SGRPlayerPaintCover((UIView *)self);
-    }
+    if (sg_cover < 0 && !objc_getAssociatedObject(self, &kTintedKey)) return;
+    UIView *stack = sg_stack, *bar = sgr_nowPlayingRoot, *button = (UIView *)self;
+    if (stack && [button isDescendantOfView:stack]) SGRPlayerPaintCover(button);
+    else if (bar && (isBarButton(button) || isBarButton(button.superview)) && [button isDescendantOfView:bar]) paintTree(button);
+}
+%end
+
+%hook _TtC18NowPlaying_BarImpl27NowPlayingBarViewController
+- (void)viewDidLayoutSubviews {
+    %orig;
+    // A gray cover was given back to the accent when it came (SGRPlayerSetCoverAccent), which left nothing to paint.
+    if (sg_cover < 0) return;
+    UIView *view = ((UIViewController *)self).viewIfLoaded;
+    if (view && view == sgr_nowPlayingRoot) paintBar(view);
 }
 %end
 

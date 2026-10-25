@@ -1098,6 +1098,12 @@ static const NSUInteger kLinesPerFrame = 4;
 - (void)showTime:(double)ms running:(BOOL)running at:(CFTimeInterval)shown;
 @end
 
+// Apple Music's hop: as its turn begins each dot rises about 0.8 of its own width, holds at the top,
+// drops back with a small undershoot and settles. One hop of the same length per dot, whatever the break's.
+static const double kHopLift = 0.8;     // of a dot's width
+static const double kHopUnder = 0.12;   // of a dot's width below rest, where the drop lands before it settles
+static const CFTimeInterval kHopLength = 0.9;   // seconds; a break is 7 s or more, so it fits in a dot's third
+
 // Local time on the dots' clock is this far into the break plus this, so no animation begins at 0,
 // which Core Animation reads as "now".
 static const CFTimeInterval kBreakEpoch = 1;
@@ -1210,17 +1216,40 @@ static double smoothstep(double p) {
         atFullRate(run);
         [_group addAnimation:run forKey:run.keyPath];
     }
-    // Each dot fills over its third of the time before they go, in the order the next line reads.
+
+    double slot = exitAt / 3;
+    CAMediaTimingFunction *rise = [CAMediaTimingFunction functionWithControlPoints:0.3 :0 :0.2 :1];
+    CAMediaTimingFunction *drop = [CAMediaTimingFunction functionWithControlPoints:0.4 :0 :1 :1];
+    CAMediaTimingFunction *settle = [CAMediaTimingFunction functionWithControlPoints:0 :0 :0.3 :1];
     for (NSUInteger i = 0; i < _dots.count; i++) {
+        CALayer *dot = _dots[i];
+        NSUInteger turn = _rightToLeft ? _dots.count - 1 - i : i;
+        CFTimeInterval begin = kBreakEpoch + turn * slot;
+
+        // Each dot fills over its third of the time before they go, in the order the next line reads.
         CABasicAnimation *fill = [CABasicAnimation animationWithKeyPath:@"opacity"];
         fill.fromValue = @(kDimAlpha);
         fill.toValue = @1;
-        fill.beginTime = kBreakEpoch + (_rightToLeft ? _dots.count - 1 - i : i) * exitAt / 3;
-        fill.duration = exitAt / 3;
+        fill.beginTime = begin;
+        fill.duration = slot;
         fill.fillMode = kCAFillModeBoth;
         fill.removedOnCompletion = NO;
         atFullRate(fill);
-        [_dots[i] addAnimation:fill forKey:@"fill"];
+        [dot addAnimation:fill forKey:@"fill"];
+
+        if (still) continue;   // Reduce Motion keeps the fill and drops the hop
+
+        CGFloat lift = -kHopLift * _side;   // y grows downward, so up is negative
+        CAKeyframeAnimation *hop = [CAKeyframeAnimation animationWithKeyPath:@"transform.translation.y"];
+        hop.values = @[@0, @(lift), @(lift), @(kHopUnder * _side), @0];
+        hop.keyTimes = @[@0, @0.42, @0.54, @0.87, @1];
+        hop.timingFunctions = @[rise, [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionLinear], drop, settle];
+        hop.beginTime = begin + (turn == 0 ? kBreakWait + kBreakFadeIn : 0);   // the first hops once the dots are in
+        hop.duration = kHopLength;
+        hop.fillMode = kCAFillModeBoth;
+        hop.removedOnCompletion = NO;
+        atFullRate(hop);
+        [dot addAnimation:hop forKey:@"hop"];
     }
 }
 
@@ -1467,29 +1496,44 @@ typedef struct {
     return _sample ?: SGKaraokeLinesForTrack(track);
 }
 
-- (void)tapped:(UITapGestureRecognizer *)tap {
-    [self stir];
-    if (_extrasBox && !_extrasBox.hidden && CGRectContainsPoint(_extrasBox.frame, [tap locationInView:self])) return;
-    if (_sing.userInteractionEnabled && [_sing pointInside:[tap locationInView:_sing] withEvent:nil]) return;
+// What a tap at point (in the view) lands on: the credit, a line's explain bubble (*explains), a line to seek
+// to, or nothing.
+- (UIView *)tapTargetAt:(CGPoint)point explains:(BOOL *)explains {
+    *explains = NO;
+    if (_extrasBox && !_extrasBox.hidden && CGRectContainsPoint(_extrasBox.frame, point)) return nil;
+    if (_sing.userInteractionEnabled && [_sing pointInside:[self convertPoint:point toView:_sing] withEvent:nil]) return nil;
+    CGPoint inScroll = [self convertPoint:point toView:_scroll];
     if (_creditLinks.count && !_credit.hidden
-        && CGRectContainsPoint(CGRectInset(_credit.frame, -kCreditSlop, -MAX(kCreditSlop, (44 - _credit.frame.size.height) / 2)),
-                               [tap locationInView:_scroll])) {
-        SGLyricsOpenCreditLinks(_creditLinks, _credit);
-        return;
+        && CGRectContainsPoint(CGRectInset(_credit.frame, -kCreditSlop, -MAX(kCreditSlop, (44 - _credit.frame.size.height) / 2)), inScroll)) {
+        return _credit;
     }
-    CGPoint point = [tap locationInView:_scroll];
     for (SGRKaraokeLineView *view in _shown.allValues) {
         CGRect target = view.bubbleTarget;
-        if (CGRectIsNull(target) || !CGRectContainsPoint(target, [_scroll convertPoint:point toView:view])) continue;
-        [self explainLine:view];
-        return;
+        if (CGRectIsNull(target) || !CGRectContainsPoint(target, [_scroll convertPoint:inScroll toView:view])) continue;
+        *explains = YES;
+        return view;
     }
-    if (_plain) return;   // a line with no time has nowhere to seek to
+    if (_plain) return nil;   // a line with no time has nowhere to seek to
+    if (_seeksAbove > 0 && (point.y > _seeksAbove || point.y < _seeksBelow)) return nil;   // the host's, where its controls were
     for (SGRKaraokeLineView *view in _shown.allValues) {
-        if (!CGRectContainsPoint(CGRectInset(view.frame, -_margin, -_lineGap / 2), point)) continue;
-        [self seekToLine:view.line];
-        return;
+        if (CGRectContainsPoint(CGRectInset(view.frame, -_margin, -_lineGap / 2), inScroll)) return view;
     }
+    return nil;
+}
+
+- (BOOL)tapSeeksAt:(CGPoint)point {
+    BOOL explains;
+    UIView *target = [self tapTargetAt:point explains:&explains];
+    return target && target != _credit && !explains;
+}
+
+- (void)tapped:(UITapGestureRecognizer *)tap {
+    [self stir];
+    BOOL explains;
+    UIView *target = [self tapTargetAt:[tap locationInView:self] explains:&explains];
+    if (target == _credit) SGLyricsOpenCreditLinks(_creditLinks, _credit);
+    else if (explains) [self explainLine:(SGRKaraokeLineView *)target];
+    else if (target) [self seekToLine:((SGRKaraokeLineView *)target).line];
 }
 
 // A tap on a line, or VoiceOver activating it.
@@ -1549,7 +1593,7 @@ typedef struct {
         _browseBreak = _openBreak;
     }
     _browsing = YES;
-    if (self.browsingBegan) self.browsingBegan();
+    if (self.browsingBegan) self.browsingBegan([scrollView.panGestureRecognizer translationInView:scrollView].y < 0);
     for (SGRKaraokeLineView *view in _shown.allValues) view.blur = 0;
 }
 

@@ -275,6 +275,11 @@ Shared:
                   block stays out of it unless the sheet itself is shown (SGPlayerMenuReplaced). Switch to video,
                   the chip over the title of a song with a music video, is hidden under either look on request
                   (VideoSwitch.x, spotifyglass.hide.videoSwitch), by its identifier in FloatingElementsUnit.
+                  Full screen cover hidden (spotifyglass.hide.fullScreenCover) stops a tap on the cover from opening
+                  Spotify's full screen cover, under either look: each look's handleTap hook on CoverArtTiltView
+                  (PlayerGestures.x) returns before Spotify's, as it does while Gestures is on. Spotify's own flag
+                  (cover_art_tilt_enabled) is left alone: with it off the cover is built without CoverArtTiltView,
+                  and every hook on that view (the redesign's rounding and shadow, the hold to 2x) has nothing to reach.
                   The sleep timer (SleepTimer.m, set from the Live Activity) pauses Spotify at a time, at the end of
                   the track or at the end of the album or playlist, the last track of it found by the tracks to come
                   that are neither queued by hand nor autoplay's (SPTPlayerTrack's provider), or by the next one
@@ -530,7 +535,10 @@ Redesigned:
                   so it slides and fades with it; Spotify lays a page out as "title • artists" over the device line or as
                   title over artists, and both are read. In the minimized row
                   the card drops its device and add buttons, faded out as it heads there and back in as it leaves. Only the title stays in the row. In a Jam the
-                  glass stays on the track and Spotify's Jam strip gets a pane of its own above it (harness/tabbar/, jam)
+                  glass stays on the track and Spotify's Jam strip gets a pane of the same glass above it, and the fade under
+                  the bars reaches above the strip while the card is above the bar; in the minimized row the card docks as it does outside a Jam and the strip
+                  rides above it at its width (harness/tabbar/, jam). Another hat on the bar keeps the card above the tab bar.
+                  Follow the cover (Player/PlayerCoverAccent.x) paints the card's lit device and like buttons too
     ContextMenu/  the ⋯ of the player and the ⋯ pinned over the playlist, album and artist pages open the system menu,
                   always (ContextMenu.h). The player's ⋯ is a pull-down button of the mod's over Spotify's: the menu
                   opens on touch down with the quick row (Spotify's items 9, 19 and 11), the player's items and More,
@@ -593,7 +601,8 @@ Redesigned:
     Lyrics/       the full screen lyrics page on glass with Apple Music style lyrics over it, always on (SGRKaraokeView,
                   which the player shows in itself too, Player/PlayerLyrics.x, where with Hide the controls set to
                   Everything, everything else -- the header row, the thumbnail, the title row and the controls --
-                  fades a few seconds after the last touch and the lines take the whole safe area until a tap; set
+                  fades a few seconds after the last touch and the lines take the whole safe area until a tap where
+                  the rest was or a scroll back; set
                   to Keep the title, only the controls under the title row and the lyrics' own button fade and the
                   lines grow down into their room): lines sung over each other lit together, the stack moving on
                   once the first is sung out; an instrumental break of 7 s or more held by three dots
@@ -774,6 +783,8 @@ leaves it running:
     scripts/phone.py settings.open | settings.page "Appearance"
     scripts/phone.py wait --id X [--gone 1] | --menu 1 | --log "system menu: the player's menu is up" [--timeout 3]
     scripts/phone.py screenshot out.png
+    scripts/phone.py layers --id sheet-view [--depth 6] [--up 1]
+    scripts/phone.py get | set --id sheet-view --path layer.sublayers.0.enabled [--value false]
 
 Views are addressed as the tree prints them: `id=` is the accessibility identifier, `a11y=` the accessibility
 label, the quoted text a label's, and a class with an index counts that class's views in the tree's order.
@@ -782,7 +793,10 @@ way: a UITouch and the IOHIDEvent gesture recognizers read, through `-[UIApplica
 controls get their control events, recognizers recognize, and a button whose menu is its primary action opens
 it on the touch down. `menu.pick` taps a row of the system's menu, not of Spotify's own sheet (tap that by
 `--text`). `log` reads the app's last 2000 `SGLog` lines from memory, so no device log capture is needed;
-a log wait looks from the start of the last command that did something. Everything runs on the main thread
+a log wait looks from the start of the last command that did something. `get` and `set` read and write a
+property by key path from the view named (or the key window), a number indexing an array, so a guess about what
+draws something is tried live; `layers` prints the layer tree with what changes how it draws (opacity, masks,
+filters, a backdrop's own keys). Everything runs on the main thread
 through `dispatch_async` and a semaphore with a timeout, waited on from the server's thread only. Checked in
 the simulator by harness/driver/.
 

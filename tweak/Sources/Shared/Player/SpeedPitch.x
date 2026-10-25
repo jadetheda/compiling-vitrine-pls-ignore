@@ -120,7 +120,7 @@ static _Atomic(Output *) sg_music;           // the output carrying the processo
 static pthread_mutex_t sg_outputsLock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER;
 static dispatch_queue_t sg_outputsQueue;
 static SGPlayerOutputWatcher sg_watchers[kMaxWatchers];
-static BOOL sg_reachable;                    // Spotify's AudioOutputUnitStart could be rebound
+static BOOL sg_reachable;                    // Spotify's AudioOutputUnitStart could be rebound or hooked
 
 // The unit in use and whether the render thread runs it: in the music's chain (pull), else in place (pitch only).
 static _Atomic(SGTimePitch *) sg_pull, sg_inPlace;
@@ -1166,6 +1166,41 @@ BOOL SGPlayerMusicClientFormat(AudioStreamBasicDescription *format) {
     return read;
 }
 
+// The jailbreak's way in (SGHookFunctionInline), where Spotify's import page cannot be written: the functions
+// themselves are hooked, every caller comes through, and only Spotify's own calls go to the replacements above,
+// as only they would through its imports. The rest, the system's frameworks and the mod's own units, go straight
+// to the original.
+#define SG_FROM_SPOTIFY SGCalledFromMainExecutable(__builtin_return_address(0))
+
+static OSStatus inlineSetProperty(AudioUnit unit, AudioUnitPropertyID property, AudioUnitScope scope, AudioUnitElement element,
+                                  const void *data, UInt32 size) {
+    return SG_FROM_SPOTIFY ? setProperty(unit, property, scope, element, data, size) : sg_setProperty(unit, property, scope, element, data, size);
+}
+
+static OSStatus inlineStartOutput(AudioUnit unit) {
+    return SG_FROM_SPOTIFY ? startOutput(unit) : sg_startOutput(unit);
+}
+
+static OSStatus inlineStopOutput(AudioUnit unit) {
+    return SG_FROM_SPOTIFY ? stopOutput(unit) : sg_stopOutput(unit);
+}
+
+static OSStatus inlineDisposeUnit(AudioComponentInstance unit) {
+    return SG_FROM_SPOTIFY ? disposeUnit(unit) : sg_dispose(unit);
+}
+
+// Start, stop and dispose all or none: a start seen without its stop or its dispose would leave an output the mod
+// thinks is running. A hook cannot be undone, so stop and dispose go first, then start, which makes the output the
+// mod's, and only then the optional speed hook, which would otherwise take Spotify's output with no start seen.
+static BOOL hookInline(void) {
+    if (!SGHookFunctionInline((void *)AudioOutputUnitStop, (void *)inlineStopOutput, (void **)&sg_stopOutput)) return NO;
+    if (!SGHookFunctionInline((void *)AudioComponentInstanceDispose, (void *)inlineDisposeUnit, (void **)&sg_dispose)) return NO;
+    if (!SGHookFunctionInline((void *)AudioOutputUnitStart, (void *)inlineStartOutput, (void **)&sg_startOutput)) return NO;
+    if (!sg_setProperty) SGHookFunctionInline((void *)AudioUnitSetProperty, (void *)inlineSetProperty, (void **)&sg_setProperty);
+    SGLog(@"audio: Spotify's output reached through the jailbreak's hooks (speed %@)", sg_setProperty ? @"too" : @"not");
+    return YES;
+}
+
 static void rebind(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -1173,20 +1208,20 @@ static void rebind(void) {
         mach_timebase_info(&timebase);
         sg_secondsPerTick = (double)timebase.numer / timebase.denom / 1e9;
         sg_outputsQueue = dispatch_queue_create("spotifyglass.outputs", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
-        if (!SGRebindImport("AudioUnitSetProperty", setProperty, (void **)&sg_setProperty) || !sg_setProperty) {
-            sg_setProperty = NULL;
-            SGLog(@"redesign speed: Spotify does not import AudioUnitSetProperty, the menu offers pitch only");
-        }
+        if (!SGRebindImport("AudioUnitSetProperty", setProperty, (void **)&sg_setProperty) || !sg_setProperty) sg_setProperty = NULL;
         sg_reachable = SGRebindImport("AudioOutputUnitStart", startOutput, (void **)&sg_startOutput) && sg_startOutput;
         if (!sg_reachable) {
-            SGLog(@"audio: Spotify does not import AudioOutputUnitStart, its output cannot be reached");
-            return;
+            sg_startOutput = NULL;
+            sg_reachable = hookInline();
+            if (!sg_reachable) SGLog(@"audio: Spotify's AudioOutputUnitStart could be neither rebound nor hooked, its output cannot be reached");
+        } else {
+            if (!SGRebindImport("AudioOutputUnitStop", stopOutput, (void **)&sg_stopOutput) || !sg_stopOutput) sg_stopOutput = AudioOutputUnitStop;
+            if (!SGRebindImport("AudioComponentInstanceDispose", disposeUnit, (void **)&sg_dispose) || !sg_dispose) {
+                sg_dispose = AudioComponentInstanceDispose;
+                SGLog(@"audio: Spotify does not import AudioComponentInstanceDispose, a disposed output is not seen");
+            }
         }
-        if (!SGRebindImport("AudioOutputUnitStop", stopOutput, (void **)&sg_stopOutput) || !sg_stopOutput) sg_stopOutput = AudioOutputUnitStop;
-        if (!SGRebindImport("AudioComponentInstanceDispose", disposeUnit, (void **)&sg_dispose) || !sg_dispose) {
-            sg_dispose = AudioComponentInstanceDispose;
-            SGLog(@"audio: Spotify does not import AudioComponentInstanceDispose, a disposed output is not seen");
-        }
+        if (!sg_setProperty) SGLog(@"redesign speed: Spotify's AudioUnitSetProperty could be neither rebound nor hooked, the menu offers pitch only");
     });
 }
 

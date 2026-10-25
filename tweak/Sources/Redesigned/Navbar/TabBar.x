@@ -360,10 +360,12 @@ static void logBarOnce(UITabBar *bar) {
 }
 @end
 
-// The now playing card (56), its gap over the bar (8) and 24 more, whether a song is playing or not.
+// The now playing card (56), its gap over the bar (8) and 24 more, whether a song is playing or not; in a
+// Jam the strip's height on top while the card is above the bar. In the minimized row the strip rides just
+// above the card, which these 88 already reach.
 static const CGFloat kFadeAbove = 88;
 
-static void placeFade(UIView *stockBar, CGRect glass) {
+static void placeFade(UIView *stockBar, CGRect glass, BOOL minimized) {
     SGRBarFade *fade = objc_getAssociatedObject(stockBar, &kFadeKey);
     if (!fade) {
         fade = [SGRBarFade new];
@@ -375,7 +377,7 @@ static void placeFade(UIView *stockBar, CGRect glass) {
         layer.locations = @[@0, @0.5, @1];
         objc_setAssociatedObject(stockBar, &kFadeKey, fade, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    CGFloat top = CGRectGetMinY(glass) - kFadeAbove;
+    CGFloat top = CGRectGetMinY(glass) - kFadeAbove - (minimized ? 0 : SGRNowPlayingStripHeight());
     CGRect frame = CGRectMake(0, top, stockBar.bounds.size.width, CGRectGetMaxY(glass) - top);
     if (!CGRectEqualToRect(fade.frame, frame)) fade.frame = frame;
     if (fade.superview != stockBar || stockBar.subviews.firstObject != fade) [stockBar insertSubview:fade atIndex:0];
@@ -565,7 +567,7 @@ static void syncBar(UIView *stockBar) {
     CGFloat height = MAX(bounds.size.height, glassHeight(bar, stockBar));
     CGRect frame = CGRectMake(0, CGRectGetMaxY(bounds) - height, width, height);
     if (!CGRectEqualToRect(host.frame, frame)) host.frame = frame;
-    placeFade(stockBar, frame);
+    placeFade(stockBar, frame, minimized);
     CGRect mainFrame = host.bounds, apartFrame = CGRectZero;
     if (minimized) {
         CGFloat side = kApartItemWidth + 2 * kPlatterInset;
@@ -820,7 +822,11 @@ static void setMinimized(BOOL minimized, BOOL animated) {
         settle(YES);
         return;
     }
-    moveFrom(host, before, ^{ SGRNowPlayingBarFollowTabBar(); }, settle);
+    SGRNowPlayingBarMoving(YES);
+    moveFrom(host, before, ^{ SGRNowPlayingBarFollowTabBar(); }, ^(BOOL finished) {
+        SGRNowPlayingBarMoving(NO);
+        settle(finished);
+    });
 }
 
 CGRect SGRTabBarInlineSlot(UIView *host, CGFloat height) {

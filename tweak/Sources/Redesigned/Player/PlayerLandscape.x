@@ -134,7 +134,7 @@ static UIButton *controlButton(NSString *symbol, CGFloat size, NSString *label, 
     _lyrics.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [_stage addSubview:_lyrics];
     __weak SGRLandscapeLyricsController *weakSelf = self;
-    _lyrics.browsingBegan = ^{ [weakSelf rest]; };
+    _lyrics.browsingBegan = ^(BOOL onward) { [weakSelf rest]; };
 
     _hide = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(rest)];
     [self.view addGestureRecognizer:_hide];

@@ -103,8 +103,8 @@ static inline Class SGRDJClass(NSString *name) {
 }
 // What fades a few seconds after the last touch while the lyrics play, as the lines grow into the room
 // (PlayerLyrics.x): nothing, everything but the lines, or the controls under the title row alone. A scroll
-// through the lines hides the same views, everything when the choice is Off. The key was a switch first: its
-// NO and YES are the first two indexes, and unset reads as the switch did.
+// on through the lines hides the same views, everything when the choice is Off, and a scroll back brings them
+// back. The key was a switch first: its NO and YES are the first two indexes, and unset reads as the switch did.
 #define SGRKeyLyricsAutoHide @"spotifyglass.redesign.lyrics.autoHide"
 typedef NS_ENUM(NSInteger, SGRLyricsHide) { SGRLyricsHideOff, SGRLyricsHideAll, SGRLyricsHideControls };
 SGRLyricsHide SGRLyricsHideMode(void);
@@ -119,6 +119,8 @@ SGModRow *SGRLyricsHideRow(void);
 BOOL SGRPlayerVolumeOn(void);
 // YES when the row shows; NO when it is off, has no controls to sit under or no room between them and the footer.
 BOOL SGRPlayerPlaceVolume(UIView *stack, UIView *controls, UIView *row, CGFloat margin);
+// Called after any slider's setValue:animated: (PlayerFooter.x), so the row follows its hidden system slider.
+void SGRPlayerVolumeSliderSet(UISlider *slider);
 
 // Follow the cover (PlayerCoverAccent.x): the player's lit controls painted in the cover's color instead of the accent.
 // Off until switched on, read at launch. The cover's color (a gray one gives the accent back), and a paint of Spotify's

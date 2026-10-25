@@ -15,6 +15,7 @@
 //     HomeTiles.m      a shortcut tile's picture run across the tile, blurred behind its title
 //     HomeTopPicks.x   Top picks: the shelf nearest the top drawn large and moved above the shortcuts, each card
 //                      the cover over a footer in its color
+//     MadeForYouCovers.x  Made For You, a Hub page opened from Home: its cards' covers at Home's radius
 //     HomePerf.x       FLEX builds: the frames of each scroll of Home and the time the hooks above took
 //
 // Every hook installs only while Redesigned UI is on (SGRedesignedUI).
