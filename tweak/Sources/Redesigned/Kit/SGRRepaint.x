@@ -36,9 +36,19 @@ enum { kInNowPlaying = 1, kInLyrics = 2, kInPage = 4 };
             }
             if (inside & kInNowPlaying) {
                 // Its size is judged when the bar picks its card: Spotify can paint a card before it sizes it.
-                if (SGIsVisibleColor(color) && ![sgr_nowPlayingPainted containsObject:view]) {
-                    [sgr_nowPlayingPainted addObject:view];
-                    dispatch_async(dispatch_get_main_queue(), ^{ [nowPlaying.superview setNeedsLayout]; });
+                if (SGIsVisibleColor(color)) {
+                    // The bar reads the table on main, and Spotify also paints layers off main.
+                    void (^learn)(UIView *) = ^(UIView *painted) {
+                        if (!painted || [sgr_nowPlayingPainted containsObject:painted]) return;
+                        [sgr_nowPlayingPainted addObject:painted];
+                        dispatch_async(dispatch_get_main_queue(), ^{ [nowPlaying.superview setNeedsLayout]; });
+                    };
+                    if (NSThread.isMainThread) {
+                        learn(view);
+                    } else {
+                        __weak UIView *weakView = view;
+                        dispatch_async(dispatch_get_main_queue(), ^{ learn(weakView); });
+                    }
                 }
                 color = NULL;
             } else if (inside & (kInLyrics | kInPage)) {

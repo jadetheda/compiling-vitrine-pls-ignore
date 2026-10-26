@@ -321,7 +321,8 @@ void SGRPlayerSetCoverAccent(UIColor *cover) {
     %orig;
     if (sg_cover < 0 && !objc_getAssociatedObject(self, &kTintedKey)) return;
     UIView *stack = sg_stack, *bar = sgr_nowPlayingRoot, *button = (UIView *)self;
-    if (stack && [button isDescendantOfView:stack]) SGRPlayerPaintCover(button);
+    // A descendant shares the stack's window, so a button in another (or the stack off screen) skips the walk up.
+    if (stack && button.window == stack.window && [button isDescendantOfView:stack]) SGRPlayerPaintCover(button);
     else if (bar && (isBarButton(button) || isBarButton(button.superview)) && [button isDescendantOfView:bar]) paintTree(button);
 }
 %end

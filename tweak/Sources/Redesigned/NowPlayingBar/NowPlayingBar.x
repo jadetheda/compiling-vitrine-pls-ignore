@@ -90,7 +90,7 @@ static UIView *trackMarker(UIView *bar) {
     __block UIView *info = nil, *artwork = nil;
     SGForEachView(bar, ^(UIView *v) {
         if (info || inStrip(v, bar)) return;
-        if ([NSStringFromClass(v.class) containsString:@"InformationContainer"]) info = v;
+        if (SGClassNamed(v.class, @"InformationContainer")) info = v;
         CGSize size = v.bounds.size;
         BOOL square = size.width >= 36 && size.width <= 48 && fabs(size.width - size.height) < 1;
         if (!artwork && square && ![v isKindOfClass:UIControl.class]) artwork = v;
@@ -523,7 +523,7 @@ void SGRNowPlayingBarMoving(BOOL moving) {
 // frame from those.
 static BOOL inSheet(UIView *view) {
     for (UIView *v = view.superview; v; v = v.superview) {
-        if ([v.accessibilityIdentifier isEqualToString:@"sheet-view"] || [NSStringFromClass(v.class) containsString:@"SheetImpl"]) return YES;
+        if ([v.accessibilityIdentifier isEqualToString:@"sheet-view"] || SGClassNamed(v.class, @"SheetImpl")) return YES;
     }
     return NO;
 }
@@ -689,7 +689,7 @@ static void styleNowPlayingBar(UIViewController *container) {
 - (void)viewDidLayoutSubviews {
     %orig;
     UIViewController *parent = ((UIViewController *)self).parentViewController;
-    if ([NSStringFromClass(parent.class) containsString:@"NowPlayingBarContainer"]) styleNowPlayingBar(parent);
+    if (SGClassNamed(parent.class, @"NowPlayingBarContainer")) styleNowPlayingBar(parent);
 }
 %end
 

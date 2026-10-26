@@ -20,6 +20,7 @@
 // The album footer is exercised by harness/album-queue and the Spotify simulator test. These
 // player-menu fixtures do not provide an album page or the shared album footer.
 void SGAlbumQueueInstall(UIViewController *menu) {}
+void SGBatchTranslationInstall(UIViewController *menu) {}
 
 void SGRPlayerMenuWatch(UIView *button);
 // touch.m: a finger's touches, through UIKit's own recognizers.

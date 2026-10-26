@@ -47,6 +47,9 @@ BOOL SGRObserveLayout(UIView *view, void (^laidOut)(UIView *view));
 // answer is kept weakly on `root` under `cacheKey` and searched for again only when it is gone, has
 // left `root` or changed its identifier. nil when there is none; a miss is not cached.
 UIView *SGRFindByIdentifier(UIView *root, NSString *identifier, const void *cacheKey);
+// SGRFindByIdentifier for every identifier at once, in one walk (Core's SGFindRememberedAll): `found[i]` is
+// identifiers[i]'s view or nil. For lookups made back to back with nothing between them that changes the tree.
+void SGRFindByIdentifiers(UIView *root, NSArray<NSString *> *identifiers, const void *const cacheKeys[], UIView *__strong found[]);
 
 // Whether `view` is the profile avatar that opens the side drawer, in the Home, Search and Library headers. Known by
 // its identifier, which every version gives it: 9.1.88 draws it in an AdaptiveFaceContainer, 9.1.90 in an Encore

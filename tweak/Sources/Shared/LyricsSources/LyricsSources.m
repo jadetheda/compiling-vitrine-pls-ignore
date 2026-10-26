@@ -72,7 +72,8 @@ static NSMutableURLRequest *requestFor(NSURL *url, NSDictionary<NSString *, NSSt
     return request;
 }
 
-// The body whatever the status, and the reply it came with; nil for both when there was none.
+// The body whatever the status, and the reply it came with, on the session's own queue so the callers
+// below can read it there before they hand the result to the main queue; nil for both when there was none.
 static void sendForReply(NSURLRequest *request, void (^done)(NSData *body, NSHTTPURLResponse *response)) {
     if (!request) {
         dispatch_async(dispatch_get_main_queue(), ^{ done(nil, nil); });
@@ -83,7 +84,7 @@ static void sendForReply(NSURLRequest *request, void (^done)(NSData *body, NSHTT
         NSHTTPURLResponse *reply = [response isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)response : nil;
         SGLyricsNoteReply(response, error);
         if (error || reply.statusCode >= 400) SGLog(@"lyrics: %@ answered %ld, error %@", url.host, (long)reply.statusCode, error);
-        dispatch_async(dispatch_get_main_queue(), ^{ done(data, reply); });
+        done(data, reply);
     }] resume];
 }
 
@@ -97,22 +98,39 @@ static id jsonIn(NSData *body) {
     return body.length ? [NSJSONSerialization JSONObjectWithData:body options:0 error:nil] : nil;
 }
 
-void SGLyricsGetJSON(NSURL *url, NSDictionary<NSString *, NSString *> *headers, void (^done)(id root)) {
+static NSString *textIn(NSData *body) {
+    return body.length ? [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] : nil;
+}
+
+static void onMain(void (^done)(id), id parsed) {
+    dispatch_async(dispatch_get_main_queue(), ^{ done(parsed); });
+}
+
+void SGLyricsGetJSONThen(NSURL *url, NSDictionary<NSString *, NSString *> *headers, id (^parse)(id root), void (^done)(id parsed)) {
     send(requestFor(url, headers), ^(NSData *body) {
-        done(jsonIn(body));
+        onMain(done, parse(jsonIn(body)));
     });
+}
+
+void SGLyricsGetJSON(NSURL *url, NSDictionary<NSString *, NSString *> *headers, void (^done)(id root)) {
+    SGLyricsGetJSONThen(url, headers, ^id(id root) { return root; }, done);
 }
 
 void SGLyricsGetJSONReply(NSURL *url, NSDictionary<NSString *, NSString *> *headers, void (^done)(id root, NSHTTPURLResponse *response)) {
     sendForReply(requestFor(url, headers), ^(NSData *body, NSHTTPURLResponse *reply) {
-        done(jsonIn(body), reply);
+        id root = jsonIn(body);
+        dispatch_async(dispatch_get_main_queue(), ^{ done(root, reply); });
+    });
+}
+
+void SGLyricsGetTextThen(NSURL *url, id (^parse)(NSString *text), void (^done)(id parsed)) {
+    send(requestFor(url, nil), ^(NSData *body) {
+        onMain(done, parse(textIn(body)));
     });
 }
 
 void SGLyricsGetText(NSURL *url, void (^done)(NSString *text)) {
-    send(requestFor(url, nil), ^(NSData *body) {
-        done(body.length ? [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding] : nil);
-    });
+    SGLyricsGetTextThen(url, ^id(NSString *text) { return text; }, done);
 }
 
 void SGLyricsPostJSON(NSURL *url, NSDictionary<NSString *, NSString *> *headers, id body, void (^done)(id root)) {
@@ -123,7 +141,7 @@ void SGLyricsPostJSON(NSURL *url, NSDictionary<NSString *, NSString *> *headers,
     request.HTTPBody = written;
     [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     send(request, ^(NSData *answer) {
-        done(jsonIn(answer));
+        onMain(done, jsonIn(answer));
     });
 }
 

@@ -18,19 +18,25 @@ SGModRow *SGLockScreenTranslationRow(void);
 SGModRow *SGLyricsTranslationLanguageRow(void);
 SGModRow *SGLyricsWordTimingRow(void);
 SGModRow *SGLyricsRomanisedRow(void);
+SGModRow *SGLyricsRomanisedReplaceRow(void);
 SGModRow *SGLyricsDelayRow(void);
 
 // Shows a line written in another alphabet (Japanese, Korean, Chinese, Cyrillic, Greek, Thai, Arabic,
 // Hebrew, Devanagari...) again under itself in Latin letters, before its translation. Off by default.
 // Only the redesign's lyrics view draws it, and it applies at once: the switch posts the notification.
 #define SGKeyLyricsRomanised @"spotifyglass.lyricsRomanised"
+// Shows the line in Latin letters in place of the original script, instead of under it.
+#define SGKeyLyricsRomanisedReplace @"spotifyglass.lyricsRomanisedReplace"
 extern NSNotificationName const SGLyricsRomanisedDidChangeNotification;
+@class SGKaraokeLine;
 // Romanise.m: the text in Latin letters, offline; nil where it has no letter of another script, or
 // reads the same. `japanese` reads kanji the Japanese way, for a song SGLyricsLooksJapanese says is
 // (a line of kanji alone would read as Chinese). Safe off the main thread, and kept per text.
 NSString *SGLyricsRomanised(NSString *text, BOOL japanese);
+// The line in Latin letters: the source's pronunciation where it has one, or SGLyricsRomanised over the line's words.
+// nil where it has no letter of another script.
+SGKaraokeLine *SGLyricsRomanisedLine(SGKaraokeLine *line, BOOL japanese);
 // Whether any of the lines has kana in it.
-@class SGKaraokeLine;
 BOOL SGLyricsLooksJapanese(NSArray<SGKaraokeLine *> *lines);
 
 // Sweeps a line timed only by the line word by word, on the estimate of when each word is sung, as if

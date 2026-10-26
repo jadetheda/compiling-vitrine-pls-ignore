@@ -109,10 +109,20 @@ static NSString *lineFor(NSDictionary *info, double elapsed, NSTimeInterval *wai
     if (index < 0) return nil;
     BOOL nextFarOff = index + 1 == (NSInteger)lines.count || lines[index + 1].start - position > SGKaraokeBreakMs;
     if (position > lines[index].end + SGKaraokeBreakMs && nextFarOff) return nil;
-    SGKaraokeLine *line = (sg_translation ? translatedLine(lines[index]) : nil) ?: lines[index];
+    SGKaraokeLine *line = (sg_translation ? translatedLine(lines[index]) : nil);
+    if (!line && SGFlag(SGKeyLyricsRomanised, NO) && SGFlag(SGKeyLyricsRomanisedReplace, NO)) {
+        line = SGLyricsRomanisedLine(lines[index], SGLyricsLooksJapanese(lines));
+    }
+    if (!line) line = lines[index];
     NSString *shown = nil;
     for (NSArray<SGKaraokeWord *> *piece in piecesOf(line)) {
-        if (!shown || piece.firstObject.start <= position) shown = textOf(piece);
+        NSInteger pieceStart = piece.firstObject.start;
+        if (!shown || pieceStart <= position) {
+            shown = textOf(piece);
+        } else if (pieceStart > position && (ms <= 0 || pieceStart - position < ms)) {
+            ms = pieceStart - position;
+            *wait = (ms + 1) / 1000.0;
+        }
     }
     return shown;
 }

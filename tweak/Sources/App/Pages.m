@@ -116,7 +116,7 @@ static UIViewController *lyricsPage(void) {
         @"Every line shows this much later than the song, for Bluetooth headphones that play a little behind the lyrics. Applies at once.");
     if (redesigned) {
         [sections addObjectsFromArray:@[
-            SGSection(@"Display", @[SGRLyricsTextSizesRow(), SGLyricsWordTimingRow(), SGLyricsRomanisedRow(),
+            SGSection(@"Display", @[SGRLyricsTextSizesRow(), SGLyricsWordTimingRow(), SGLyricsRomanisedRow(), SGLyricsRomanisedReplaceRow(),
                 SGRLyricsHideRow(),
                 SGSwitchRow(@"Landscape lyrics", @"Turn the phone with the lyrics open", SGRKeyLyricsLandscape)]),
             timing,

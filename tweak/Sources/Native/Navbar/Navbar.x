@@ -383,13 +383,12 @@ void SGLogTabBarRow(UIView *tabBar) {
 %hook _TtC28NavigationUI_TabBarItemsImpl29TabBarItemsNavigationListImpl
 - (NSArray *)items {
     NSArray *items = %orig;
+    static BOOL logged;
+    if (logged) return items;
+    logged = YES;
     NSMutableString *out = [NSMutableString stringWithFormat:@"list read, %lu items", (unsigned long)items.count];
     for (id item in items) [out appendFormat:@"\n  %@ · %@", [item valueForKey:@"title"], [item valueForKey:@"viewURI"]];
-    static NSString *last;
-    if (![out isEqualToString:last]) {
-        last = [out copy];
-        SGLogLong(@"navbar", out);
-    }
+    SGLogLong(@"navbar", out);
     return items;
 }
 %end

@@ -695,7 +695,8 @@ void SGRPlayerToggleLyrics(void) {
 static void replace(void) {
     UIView *host = sg_host;
     if (!host || sg_moving) return;   // a pass in the middle of the transition would cut it short
-    SGRLyricsLayout l = layoutIn(host);
+    // Closed, placeTitleRow reads nothing of the layout, so the cover is not measured for it.
+    SGRLyricsLayout l = sg_open ? layoutIn(host) : (SGRLyricsLayout){0};
     if (sg_open && !l.ok) return;
     placeTitleRow(l);
     sg_floating.viewIfLoaded.alpha = sg_open ? 0 : 1;

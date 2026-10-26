@@ -43,10 +43,18 @@ static BOOL buttonHidden(UIView *action) {
     return key && SGHidden(key);
 }
 
+static BOOL anyButtonSwitch(void) {
+    for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++) {
+        if (SGHidden(buttons[i].key)) return YES;
+    }
+    return NO;
+}
+
 // The buttons arrive after the page has laid out, and a row that keeps its size lays nothing else out.
 %hook UIStackView
 - (void)layoutSubviews {
     %orig;
+    if (!anyButtonSwitch()) return;
     BOOL any = NO;
     for (UIView *action in self.subviews) {
         if ((any = buttonHidden(action))) break;

@@ -82,9 +82,22 @@ static void applyColumn(UIView *header) {
 // the action rather than the button and the row closes up behind it.
 // An action already hidden is passed over.
 static void applyActions(UIView *row) {
+    // The buttons with a switch on, looked for under each action in one walk.
+    NSString *idents[kButtons];
+    const void *keys[kButtons];
+    NSUInteger count = 0;
+    for (size_t i = 0; i < kButtons; i++) {
+        if (!SGHidden(buttons[i].key)) continue;
+        idents[count] = buttons[i].ident;
+        keys[count++] = &kButtonKeys[i];
+    }
+    if (!count) return;
     for (UIView *action in row.subviews) {
-        for (size_t i = 0; i < kButtons && !action.hidden; i++) {
-            if (SGHidden(buttons[i].key) && SGFindIdentifier(action, buttons[i].ident, &kButtonKeys[i])) action.hidden = YES;
+        if (action.hidden) continue;
+        UIView *found[count];
+        SGFindIdentifiers(action, count, idents, keys, found);
+        for (NSUInteger i = 0; i < count && !action.hidden; i++) {
+            if (found[i]) action.hidden = YES;
         }
     }
 }

@@ -284,10 +284,12 @@ static void complete(id<NSURLSessionDataDelegate> delegate, NSURLSession *sessio
 %hook NSURLSessionTask
 - (void)resume {
     NSURL *url = self.currentRequest.URL ?: self.originalRequest.URL;
-    NSString *host = url.host.lowercaseString ?: @"", *path = url.path.lowercaseString ?: @"";
+    NSString *host = url.host.lowercaseString ?: @"";
     BOOL spotify = has(host, @"spotify") || has(host, @"spclient");
-    if (spotify && elapsed() > 30 && (has(path, @"deletetoken") || has(path, @"signup/public") || has(path, @"pses/screenconfig")
-                                      || isCustomize(path) || has(host, @"apresolve"))) {
+    // The path is lowercased only for the requests the tests below can cancel.
+    NSString *path = spotify && elapsed() > 30 ? url.path.lowercaseString ?: @"" : nil;
+    if (path && (has(path, @"deletetoken") || has(path, @"signup/public") || has(path, @"pses/screenconfig")
+                 || isCustomize(path) || has(host, @"apresolve"))) {
         SGAdBlockSawOne(@"Requests");
         SGAdBlockCountOne(@"Requests");
         SGLog(@"canceled %@%@ before it left", host, path);

@@ -372,10 +372,22 @@ static const SGRule rules[] = {
     {"core-player", "disable_smart_shuffle_when_in_jam", SGRuleForce, NO, NULL},
 };
 static const size_t ruleCount = sizeof(rules) / sizeof(rules[0]);
+// The rules' scope and name as NSStrings, made once: every rule is tried against every entry of a config.
+static NSString *ruleScopes[sizeof(rules) / sizeof(rules[0])], *ruleNames[sizeof(rules) / sizeof(rules[0])];
 
-static BOOL ruleMatches(const SGRule *rule, NSString *scope, NSString *name) {
-    if (rule->scope && ![scope isEqualToString:@(rule->scope)]) return NO;
-    return !rule->name || [name isEqualToString:@(rule->name)];
+static void boxRules(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        for (size_t i = 0; i < ruleCount; i++) {
+            ruleScopes[i] = rules[i].scope ? @(rules[i].scope) : nil;
+            ruleNames[i] = rules[i].name ? @(rules[i].name) : nil;
+        }
+    });
+}
+
+static BOOL ruleMatches(size_t i, NSString *scope, NSString *name) {
+    if (ruleScopes[i] && ![scope isEqualToString:ruleScopes[i]]) return NO;
+    return !ruleNames[i] || [name isEqualToString:ruleNames[i]];
 }
 
 // A false BoolValue is an empty message, as protobuf writes it.
@@ -424,6 +436,7 @@ static NSData *patchConfiguration(NSData *configuration) {
     NSMutableArray<SGPBField *> *fields = SGPBParse(configuration);
     if (!fields) return nil;
     keepLiveConfiguration(fields);
+    boxRules();
     NSMutableArray<SGPBField *> *out = [NSMutableArray array];
     NSMutableSet<NSString *> *present = [NSMutableSet set];
     for (SGPBField *field in fields) {
@@ -437,7 +450,7 @@ static NSData *patchConfiguration(NSData *configuration) {
         NSString *scope = SGPBText(SGPBFirst(parts, 1)) ?: @"", *name = SGPBText(SGPBFirst(parts, 2)) ?: @"";
         BOOL removed = NO;
         for (size_t i = 0; i < ruleCount && !removed; i++) {
-            if (!ruleMatches(&rules[i], scope, name)) continue;
+            if (!ruleMatches(i, scope, name)) continue;
             switch (rules[i].kind) {
                 case SGRuleRemove: removed = YES; break;
                 case SGRuleSet:

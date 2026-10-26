@@ -45,13 +45,34 @@ static UIView *actionHolding(UIView *button, UIView *header) {
 }
 
 static void applyHeader(UIView *header) {
-    if (SGHidden(SGHideArtistVerified)) SGFindIdentifier(header, kBadge, &kBadgeKey).hidden = YES;
-    // Its AutoLayoutStackView traps like OverflowStackView below once the label goes hidden.
-    if (SGHidden(SGHideArtistListeners)) SGFindIdentifier(header, kMetadata, &kMetadataKey).alpha = 0;
-
+    // Every part with a switch on, looked for in one walk; hiding one changes no view's place or identifier.
+    BOOL hideBadge = SGHidden(SGHideArtistVerified), hideListeners = SGHidden(SGHideArtistListeners);
+    NSString *idents[kButtons + 2];
+    const void *keys[kButtons + 2];
+    NSUInteger count = 0;
+    if (hideBadge) {
+        idents[count] = kBadge;
+        keys[count++] = &kBadgeKey;
+    }
+    if (hideListeners) {
+        idents[count] = kMetadata;
+        keys[count++] = &kMetadataKey;
+    }
     for (size_t i = 0; i < kButtons; i++) {
         if (!SGHidden(buttons[i].key)) continue;
-        UIView *action = actionHolding(SGFindIdentifier(header, buttons[i].ident, &kButtonKeys[i]), header);
+        idents[count] = buttons[i].ident;
+        keys[count++] = &kButtonKeys[i];
+    }
+    if (!count) return;
+    UIView *found[count];
+    SGFindIdentifiers(header, count, idents, keys, found);
+
+    NSUInteger at = 0;
+    if (hideBadge) found[at++].hidden = YES;
+    // Its AutoLayoutStackView traps like OverflowStackView below once the label goes hidden.
+    if (hideListeners) found[at++].alpha = 0;
+    for (; at < count; at++) {
+        UIView *action = actionHolding(found[at], header);
         if (!action) continue;
         // OverflowStackView traps in updateConstraints once its views go hidden (crash 2026-09-15),
         // so those only turn invisible and keep their place.

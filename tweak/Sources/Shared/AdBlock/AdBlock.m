@@ -163,7 +163,7 @@ static NSMutableDictionary<NSString *, NSNumber *> *countsLocked(void) {
         if (sg_counts.count && !sg_counts[checkedKey(@"Requests")]) {
             [sg_counts removeAllObjects];
             sg_counts[checkedKey(@"Requests")] = @0;
-            [NSUserDefaults.standardUserDefaults setObject:sg_counts forKey:kCounts];
+            SGPrefsWriteUnmemoized(^{ [NSUserDefaults.standardUserDefaults setObject:sg_counts forKey:kCounts]; });
         }
     }
     return sg_counts;
@@ -174,7 +174,7 @@ static NSMutableDictionary<NSString *, NSNumber *> *countsLocked(void) {
 // half a minute at most. Called under the lock.
 static void saveLocked(BOOL now) {
     if (!sg_unsaved || (!now && CFAbsoluteTimeGetCurrent() - sg_savedAt < 30)) return;
-    [NSUserDefaults.standardUserDefaults setObject:countsLocked() forKey:kCounts];
+    SGPrefsWriteUnmemoized(^{ [NSUserDefaults.standardUserDefaults setObject:countsLocked() forKey:kCounts]; });
     sg_unsaved = NO;
     sg_savedAt = CFAbsoluteTimeGetCurrent();
 }

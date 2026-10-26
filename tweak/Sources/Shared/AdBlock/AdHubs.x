@@ -51,7 +51,11 @@ static BOOL isAd(NSDictionary *component) {
     id kind = component[@"component"];
     if ([kind isKindOfClass:NSDictionary.class]) {
         NSString *ns = kind[@"namespace"], *name = kind[@"name"];
-        if (adWord(ns) || adWord(name) || adWord([NSString stringWithFormat:@"%@:%@", ns, name])) return YES;
+        if (adWord(ns) || adWord(name)) return YES;
+        // No ad word has a ':', so in two strings the joined form only adds an intent word in one next to a
+        // surface word in the other; a part that is not a string is matched on its description, as before.
+        BOOL strings = (!ns || [ns isKindOfClass:NSString.class]) && (!name || [name isKindOfClass:NSString.class]);
+        if ((upsells || !strings) && adWord([NSString stringWithFormat:@"%@:%@", ns, name])) return YES;
     } else if (adWord(kind)) {
         return YES;
     }

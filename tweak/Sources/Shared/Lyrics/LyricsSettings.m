@@ -63,6 +63,15 @@ SGModRow *SGLyricsRomanisedRow(void) {
     return row;
 }
 
+SGModRow *SGLyricsRomanisedReplaceRow(void) {
+    SGModRow *row = SGOptionRow(@"In place of original", @"Show the Latin letters instead of the original script", SGKeyLyricsRomanisedReplace);
+    row.waitsOn = SGKeyLyricsRomanised;
+    row.changed = ^(BOOL on) {
+        [NSNotificationCenter.defaultCenter postNotificationName:SGLyricsRomanisedDidChangeNotification object:nil];
+    };
+    return row;
+}
+
 // Only the redesign's lyrics view sweeps words.
 SGModRow *SGLyricsWordTimingRow(void) {
     return SGOptionRow(@"Simulate word timing", nil, SGKeyLyricsSimulateWords);

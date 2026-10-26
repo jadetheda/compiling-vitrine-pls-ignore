@@ -72,23 +72,64 @@ BOOL SGHasClass(UIView *root, NSString *marker) {
 @implementation SGWeakBox
 @end
 
-UIView *SGFindRemembered(UIView *root, const void *key, BOOL (^match)(UIView *view)) {
-    if (!root) return nil;
+// The view remembered on `root` under `key`, while it still matches and is still under `root`.
+static UIView *remembered(UIView *root, const void *key, BOOL (^match)(UIView *view)) {
     SGWeakBox *box = objc_getAssociatedObject(root, key);
     UIView *cached = box.value;
-    if (cached && match(cached) && [cached isDescendantOfView:root]) return cached;
-    UIView *found = firstMatch(root, match);
-    if (!found) return nil;
+    return cached && match(cached) && [cached isDescendantOfView:root] ? cached : nil;
+}
+
+static void remember(UIView *root, const void *key, UIView *found) {
+    SGWeakBox *box = objc_getAssociatedObject(root, key);
     if (!box) {
         box = [SGWeakBox new];
         objc_setAssociatedObject(root, key, box, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     box.value = found;
+}
+
+UIView *SGFindRemembered(UIView *root, const void *key, BOOL (^match)(UIView *view)) {
+    if (!root) return nil;
+    UIView *found = remembered(root, key, match);
+    if (found) return found;
+    found = firstMatch(root, match);
+    if (found) remember(root, key, found);
     return found;
+}
+
+// Depth first like firstMatch, testing every key still wanted at each view, so each takes the first view it
+// accepts; done once every key has one.
+static void matchAll(UIView *view, NSUInteger count, BOOL (^match)(NSUInteger i, UIView *view), UIView *__strong out[], NSUInteger *left) {
+    for (NSUInteger i = 0; i < count; i++) {
+        if (out[i] || !match(i, view)) continue;
+        out[i] = view;
+        if (!--*left) return;
+    }
+    for (UIView *sub in view.subviews) {
+        matchAll(sub, count, match, out, left);
+        if (!*left) return;
+    }
+}
+
+void SGFindRememberedAll(UIView *root, NSUInteger count, const void *const keys[], BOOL (^match)(NSUInteger i, UIView *view), UIView *__strong out[]) {
+    NSUInteger left = 0;
+    for (NSUInteger i = 0; i < count; i++) {
+        out[i] = root ? remembered(root, keys[i], ^BOOL(UIView *v) { return match(i, v); }) : nil;
+        if (!out[i]) left++;
+    }
+    if (!root || !left) return;
+    matchAll(root, count, match, out, &left);
+    for (NSUInteger i = 0; i < count; i++) {
+        if (out[i]) remember(root, keys[i], out[i]);
+    }
 }
 
 UIView *SGFindIdentifier(UIView *root, NSString *prefix, const void *key) {
     return SGFindRemembered(root, key, ^BOOL(UIView *v) { return [v.accessibilityIdentifier hasPrefix:prefix]; });
+}
+
+void SGFindIdentifiers(UIView *root, NSUInteger count, NSString *const prefixes[], const void *const keys[], UIView *__strong out[]) {
+    SGFindRememberedAll(root, count, keys, ^BOOL(NSUInteger i, UIView *v) { return [v.accessibilityIdentifier hasPrefix:prefixes[i]]; }, out);
 }
 
 BOOL SGKeepsColor(UIView *view) {

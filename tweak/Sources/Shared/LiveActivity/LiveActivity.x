@@ -85,6 +85,7 @@ static const double kAccentLuminance = 0.48;
 static NSTimer *sg_timer;
 static NSTimeInterval sg_tickEvery;
 static NSString *sg_shown;
+static NSArray *sg_shownFields;   // the fields sg_shown was built from, as read
 static NSString *sg_missingLyrics;
 // The tracks whose look for lyrics ended (SGKaraokeLinesKeptNotification), with lines or without: a set, since
 // the track up next is looked up too, ahead of the one playing.
@@ -114,7 +115,7 @@ static void startTimer(NSTimeInterval every) API_AVAILABLE(ios(17.0)) {
 
 // Sends `shown`, what the activity is to show as one string, unless it is showing that already and was
 // sent within kRefresh; starts the activity when there is none and the app is in front.
-static void send(NSString *shown, void (^show)(void)) API_AVAILABLE(ios(17.0)) {
+static void send(NSString *shown, NSArray *fields, void (^show)(void)) API_AVAILABLE(ios(17.0)) {
     // ActivityKit is asked only when there is something to send: each question is a round trip to the system,
     // and this runs four times a second. An activity ended from outside is started again within kRefresh.
     if ([shown isEqualToString:sg_shown] && -sg_lastSent.timeIntervalSinceNow < kRefresh) return;
@@ -143,6 +144,7 @@ static void send(NSString *shown, void (^show)(void)) API_AVAILABLE(ios(17.0)) {
         sg_lastStart = [NSDate date];
     }
     sg_shown = shown;
+    sg_shownFields = fields;
     sg_lastSent = [NSDate date];
     show();
 }
@@ -192,9 +194,18 @@ static NSString *lyricsLine(NSString *trackID, NSString **next, NSString **trans
     if (position >= 0) position -= SGKaraokeDelayMs();
     // With two voices at once, the one that came in first, and the one singing over it as the next.
     NSInteger index = SGKaraokeLeadLine(lines, position);
-    *next = index + 1 < (NSInteger)lines.count ? SGKaraokeLineText(lines[index + 1]) : @"";
+    BOOL replace = SGFlag(SGKeyLyricsRomanised, NO) && SGFlag(SGKeyLyricsRomanisedReplace, NO);
+    BOOL japanese = replace && SGLyricsLooksJapanese(lines);
+    if (index + 1 < (NSInteger)lines.count) {
+        SGKaraokeLine *nextLine = lines[index + 1];
+        if (replace) nextLine = SGLyricsRomanisedLine(nextLine, japanese) ?: nextLine;
+        *next = SGKaraokeLineText(nextLine);
+    } else {
+        *next = @"";
+    }
     if (index < 0) return @"♪";
     SGKaraokeLine *current = lines[index];
+    if (replace) current = SGLyricsRomanisedLine(current, japanese) ?: current;
     BOOL nextFarOff = index + 1 == (NSInteger)lines.count || lines[index + 1].start - position > kBreakMs;
     if (position > current.end + kBreakMs && nextFarOff) return @"♪";
     *translation = current.translation;
@@ -351,6 +362,17 @@ static void tick(void) API_AVAILABLE(ios(17.0)) {
     SGSleepTimerMode sleepMode = SGSleepTimerCurrentMode();
     NSDate *sleepEnd = SGSleepTimerEnd();
 
+    // The fields as read, before the string below is built from them: equal fields give an equal string, which
+    // send would set aside, so the string and its two dozen pieces are built only once a field moved or kRefresh
+    // has passed. The string stays what send compares, as two fields with a line break between them could read as
+    // one. The small numbers are tagged pointers, so this is one array a tick.
+    NSArray *fields = @[@(view), @(paused), line, next, @(tab), title, artist, @(shuffle), @(repeatMode),
+        @((long long)sleepEnd.timeIntervalSince1970), @(sleepMode), tint ?: @"", translation ?: @"",
+        paused ? @0 : @((long long)trackStart.timeIntervalSince1970), paused ? @(round(pausedAt.doubleValue * 100)) : @0,
+        cover ? sg_artTrack : @"", @(textSize), @(alignment), @(noLyrics), @(withoutLyrics), @(colors), accent ?: @"", @(progressBar),
+        titles, artists, uris];
+    if ([fields isEqualToArray:sg_shownFields] && -sg_lastSent.timeIntervalSinceNow < kRefresh) return;
+
     NSMutableArray<NSString *> *parts = [NSMutableArray arrayWithObjects:@(view).stringValue, paused ? @"1" : @"0", line, next,
         @(tab).stringValue, title, artist, shuffle ? @"1" : @"0", @(repeatMode).stringValue,
         @((long long)sleepEnd.timeIntervalSince1970).stringValue, @(sleepMode).stringValue, tint ?: @"", translation ?: @"",
@@ -358,7 +380,7 @@ static void tick(void) API_AVAILABLE(ios(17.0)) {
         cover ? sg_artTrack : @"", @(textSize).stringValue, @(alignment).stringValue, noLyrics ? @"1" : @"0",
         @(withoutLyrics).stringValue, @(colors).stringValue, accent ?: @"", progressBar ? @"1" : @"0", nil];
     for (NSUInteger i = 0; i < titles.count; i++) [parts addObject:[NSString stringWithFormat:@"%@\t%@\t%@", titles[i], artists[i], uris[i]]];
-    send([parts componentsJoinedByString:@"\n"], ^{
+    send([parts componentsJoinedByString:@"\n"], fields, ^{
         [SGLiveActivityBridge showWithView:view paused:paused line:line nextLine:next titles:titles artists:artists uris:uris
                                         tab:tab title:title artist:artist shuffle:shuffle repeatMode:repeatMode
                                    timerEnd:sleepEnd timerEndOfTrack:sleepMode == SGSleepTimerEndOfTrack
@@ -481,6 +503,7 @@ void SGSetLiveActivityEnabled(BOOL on) {
         [sg_timer invalidate];
         sg_timer = nil;
         sg_shown = nil;
+        sg_shownFields = nil;
         sg_lastStart = nil;
         // A sleep timer runs on its own clock (SleepTimer.m) and stays set: the shortcut and the control set it
         // with the card off, and a card switched back on shows it from its first tick.

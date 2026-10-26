@@ -296,7 +296,7 @@ UIView *SGRPlayerConnectGlyphIn(UIView *host, UIView *connect) {
         dispatch_async(dispatch_get_main_queue(), ^{ [weakHost setNeedsLayout]; });
     }
     SGForEachView(connect, ^(UIView *view) {
-        if ([view isKindOfClass:UILabel.class] || [NSStringFromClass(view.class) containsString:@"MarqueeLabel"]) SGRPlayerVanish(view);
+        if ([view isKindOfClass:UILabel.class] || SGClassNamed(view.class, @"MarqueeLabel")) SGRPlayerVanish(view);
     });
     if (glyph) standInForConnect((UIImageView *)glyph);
     return glyph;
@@ -360,8 +360,8 @@ void SGRPlayerLowerRow(UIView *row) {
     // Only the controls, and only straight above: a volume row between them keeps its place and theirs.
     UIView *above = rowAbove(row);
     // The ordinary player's controls unit, or the AI DJ's head unit (DJPlayer.x), which holds the same buttons.
-    NSString *unit = NSStringFromClass(unitOf(above).class);
-    BOOL controls = [unit containsString:@"PlaybackControlsElementsUnit"] || [unit containsString:@"DJMHeadUnitViewController"];
+    Class unit = unitOf(above).class;
+    BOOL controls = SGClassNamed(unit, @"PlaybackControlsElementsUnit") || SGClassNamed(unit, @"DJMHeadUnitViewController");
     // With the volume row, the controls stay where Spotify put them and the row takes the room the footer leaves.
     // The volume row is placed against the controls where they would stand for it; one that does not show leaves them
     // following the footer as they do without it.
@@ -408,19 +408,20 @@ void SGRPlayerLowerRow(UIView *row) {
     CGFloat width = host.bounds.size.width, middleY = CGRectGetMidY(host.bounds);
     BOOL rtl = host.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft;
 
-    UIView *share = SGRFindByIdentifier(host, @"ShareButtonNowPlayingView", &kShareKey);
-    // The arranged view goes too: a view that takes touches swallows them even with nothing on it.
-    SGRPlayerVanish(share);
-    SGRPlayerVanish(arrangedAround(share, host));
-    // Spotify's clip button, hidden in every clean tree, would turn up where the queue moves to.
-    UIView *trimmer = SGRFindByIdentifier(host, @"nowplaying-npv-media-trimmer-navigation-button", &kTrimmerKey);
-    SGRPlayerVanish(trimmer);
-    SGRPlayerVanish(arrangedAround(trimmer, host));
-    // "From <friend>" on a track a friend shared sits in the middle of the row, over Connect, which the
-    // row moves there; the Music app has no such chip.
-    UIView *sharedBy = SGRFindByIdentifier(host, @"Components.UI.SharedByChip", &kSharedByKey);
-    SGRPlayerVanish(sharedBy);
-    SGRPlayerVanish(arrangedAround(sharedBy, host));
+    // Share; Spotify's clip button, hidden in every clean tree, which would turn up where the queue moves to; and
+    // "From <friend>" on a track a friend shared, which sits in the middle of the row, over Connect, which the row
+    // moves there (the Music app has no such chip). Found in one walk: nothing between them touches the tree.
+    static const void *const goneKeys[] = {&kShareKey, &kTrimmerKey, &kSharedByKey};
+    UIView *gone[3];
+    static NSArray<NSString *> *goneIdentifiers;
+    if (!goneIdentifiers) goneIdentifiers = @[@"ShareButtonNowPlayingView", @"nowplaying-npv-media-trimmer-navigation-button", @"Components.UI.SharedByChip"];
+    SGRFindByIdentifiers(host, goneIdentifiers, goneKeys, gone);
+    UIView *share = gone[0];
+    for (NSUInteger i = 0; i < 3; i++) {
+        SGRPlayerVanish(gone[i]);
+        // The arranged view goes too: a view that takes touches swallows them even with nothing on it.
+        SGRPlayerVanish(arrangedAround(gone[i], host));
+    }
 
     SGRGlyphButton *lyrics = SGRPlayerLyricsGlyphIn(host);
     lyrics.bounds = CGRectMake(0, 0, 44, 44);

@@ -4,8 +4,13 @@
 static NSString *const kIndex = @".index.plist";   // track URI -> file name
 
 NSString *SGLosslessStoreDirectory(void) {
-    NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *directory = [documents stringByAppendingPathComponent:@"Lossless"];
+    static NSString *directory;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *documents = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        directory = [documents stringByAppendingPathComponent:@"Lossless"];
+    });
+    // Made again on every call: a folder the user deletes in Files comes back, and its date is read each second.
     [NSFileManager.defaultManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:NULL];
     return directory;
 }

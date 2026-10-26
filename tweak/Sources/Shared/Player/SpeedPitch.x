@@ -1315,7 +1315,9 @@ BOOL SGPlayerWatchMusicOutput(SGPlayerOutputWatcher watcher) {
 - (void)playerStateDidChange:(SPTPlayerState *)state {}
 - (void)playerStateDidReport:(SPTPlayerState *)state {
     if (loadFloat(&sg_speedBits) == 1 || !state.isPlaying || state.isPaused) return;
-    BOOL buffering = [state respondsToSelector:NSSelectorFromString(@"isBuffering")] && [[state valueForKey:@"isBuffering"] boolValue];
+    static SEL isBuffering;
+    if (!isBuffering) isBuffering = NSSelectorFromString(@"isBuffering");
+    BOOL buffering = [state respondsToSelector:isBuffering] && [[state valueForKey:@"isBuffering"] boolValue];
     if (buffering || state.playbackSpeed == 0) rearmClock();
 }
 @end

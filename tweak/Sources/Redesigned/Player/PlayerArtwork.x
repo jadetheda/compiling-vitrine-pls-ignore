@@ -253,9 +253,9 @@ static void watchHold(UIView *tilt) {
 %hook _TtC35CreativeWorkCommons_CoverArtTiltKit16CoverArtTiltView
 - (void)layoutSubviews {
     UIView *tilt = (UIView *)self;
-    BOOL player = inCoverCell(tilt);
     %orig;
-    if (tilt.bounds.size.width < kCoverMinWidth || !player) return;
+    // The width first: the bar's and the pages' small tilt views skip the walk up to the cell.
+    if (tilt.bounds.size.width < kCoverMinWidth || !inCoverCell(tilt)) return;
     UIView *cover = coverIn(tilt);
     if (!cover) return;
     [sg_tilts addObject:tilt];
