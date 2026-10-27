@@ -302,7 +302,18 @@ static OSStatus pullSource(Output *output, AudioUnit source, const AudioTimeStam
             return noErr;
         }
         // A buffer marked silent may still hold what was in it before; nothing after this reads the mark.
-        if (flags & kAudioUnitRenderAction_OutputIsSilence) {
+        BOOL silentPull = (flags & kAudioUnitRenderAction_OutputIsSilence) != 0;
+        if (!silentPull && target->mBuffers[0].mData && count > 0) {
+            const float *samples = (const float *)target->mBuffers[0].mData;
+            if (fabsf(samples[0]) <= 1e-4f && fabsf(samples[count / 2]) <= 1e-4f && fabsf(samples[count - 1]) <= 1e-4f) {
+                bool hasSound = false;
+                for (UInt32 i = 0; i < count; i += 16) {
+                    if (fabsf(samples[i]) > 1e-4f) { hasSound = true; break; }
+                }
+                if (!hasSound) silentPull = true;
+            }
+        }
+        if (silentPull) {
             silence(target);
         } else if (output == music()) {
             double rate = rateOf(&output->client);
@@ -1080,7 +1091,7 @@ static NSString *trackOf(SPTPlayerState *state) {
 // Away from 1x, Spotify's next report from now starts the own clock over.
 static void rearmClock(void) {
     os_unfair_lock_lock(&sg_clockLock);
-    sg_clock = (typeof(sg_clock)){.armed = loadFloat(&sg_speedBits) != 1, .notBefore = CFAbsoluteTimeGetCurrent()};
+    sg_clock = (typeof(sg_clock)){.armed = loadFloat(&sg_speedBits) != 1, .notBefore = CFAbsoluteTimeGetCurrent() - 0.2};
     os_unfair_lock_unlock(&sg_clockLock);
 }
 
@@ -1308,17 +1319,51 @@ BOOL SGPlayerWatchMusicOutput(SGPlayerOutputWatcher watcher) {
 // and the core reports speed 0 at the place it stopped, then resumes from there (notes/speed-rebuffer.md). Its
 // clock is right and the own one, which counted the zeros, is ahead. Each stall report hands the clock back to
 // Spotify's, and the report that resumes starts it over at the right place.
+// When the buffer runs dry at speeds > 1x, Spotify gets stuck in a choppy starvation loop (~0.8s stall every 2s).
+// A sustained stall triggers a seek to Spotify's current position, forcing Spotify's core to refill a full
+// ~30s buffer while preserving seamless audio continuity.
 @interface SGSpeedObserver : NSObject <SGPlayerStateObserver>
 @end
 
-@implementation SGSpeedObserver
+@implementation SGSpeedObserver {
+    CFAbsoluteTime _lastRebufferTime;
+    CFAbsoluteTime _stallStartedAt;
+}
+
 - (void)playerStateDidChange:(SPTPlayerState *)state {}
+
 - (void)playerStateDidReport:(SPTPlayerState *)state {
-    if (loadFloat(&sg_speedBits) == 1 || !state.isPlaying || state.isPaused) return;
+    if (loadFloat(&sg_speedBits) == 1 || !state.isPlaying || state.isPaused) {
+        _stallStartedAt = 0;
+        return;
+    }
     static SEL isBuffering;
     if (!isBuffering) isBuffering = NSSelectorFromString(@"isBuffering");
     BOOL buffering = [state respondsToSelector:isBuffering] && [[state valueForKey:@"isBuffering"] boolValue];
-    if (buffering || state.playbackSpeed == 0) rearmClock();
+    BOOL stalled = buffering || state.playbackSpeed == 0;
+    if (stalled) {
+        rearmClock();
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (_stallStartedAt == 0) {
+            _stallStartedAt = now;
+        } else if (now - _stallStartedAt >= 0.25 && now - _lastRebufferTime > 6.0) {
+            double position = sg_spotifyPosition;
+            if (position < 0) position = state.position;
+            double duration = [state respondsToSelector:@selector(duration)] ? state.duration : 0;
+            if (position >= 0 && (duration <= 0 || position < duration - 2.0)) {
+                id player = SGPlayer();
+                if ([player respondsToSelector:@selector(seekTo:)]) {
+                    _lastRebufferTime = now;
+                    _stallStartedAt = 0;
+                    SGLog(@"speed: recovering from buffer starvation at %.1fx; seeking Spotify to %.2fs to refill buffer",
+                          loadFloat(&sg_speedBits), position);
+                    [(id<SPTPlayer>)player seekTo:position];
+                }
+            }
+        }
+    } else {
+        _stallStartedAt = 0;
+    }
 }
 @end
 
