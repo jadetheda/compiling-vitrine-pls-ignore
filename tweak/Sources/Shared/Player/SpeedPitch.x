@@ -303,15 +303,18 @@ static OSStatus pullSource(Output *output, AudioUnit source, const AudioTimeStam
         }
         // A buffer marked silent may still hold what was in it before; nothing after this reads the mark.
         BOOL silentPull = (flags & kAudioUnitRenderAction_OutputIsSilence) != 0;
-        if (!silentPull && output == music() && target->mNumberBuffers > 0 && target->mBuffers[0].mData && count > 0) {
-            const float *samples = (const float *)target->mBuffers[0].mData;
-            if (fabsf(samples[0]) <= 1e-4f) {
-                bool hasSound = false;
-                for (UInt32 i = 1; i < count; i++) {
+        if (!silentPull && output == music() && target->mNumberBuffers > 0) {
+            bool hasSound = false;
+            for (UInt32 b = 0; !hasSound && b < target->mNumberBuffers; ++b) {
+                const float *samples = (const float *)target->mBuffers[b].mData;
+                UInt32 n = target->mBuffers[b].mDataByteSize / sizeof(float);
+                if (!samples || n == 0) continue;
+                if (fabsf(samples[0]) > 1e-4f) { hasSound = true; break; }
+                for (UInt32 i = 1; i < n; i++) {
                     if (fabsf(samples[i]) > 1e-4f) { hasSound = true; break; }
                 }
-                if (!hasSound) silentPull = true;
             }
+            if (!hasSound) silentPull = true;
         }
         if (silentPull) {
             silence(target);
@@ -1340,7 +1343,7 @@ BOOL SGPlayerWatchMusicOutput(SGPlayerOutputWatcher watcher) {
         return;
     }
     NSString *track = trackOf(state);
-    if (![track isEqualToString:_currentTrack]) {
+    if (track.length && ![track isEqualToString:_currentTrack]) {
         _currentTrack = [track copy];
         _stallStartedAt = 0;
         _hasPlayed = NO;
