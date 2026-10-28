@@ -303,11 +303,11 @@ static OSStatus pullSource(Output *output, AudioUnit source, const AudioTimeStam
         }
         // A buffer marked silent may still hold what was in it before; nothing after this reads the mark.
         BOOL silentPull = (flags & kAudioUnitRenderAction_OutputIsSilence) != 0;
-        if (!silentPull && target->mBuffers[0].mData && count > 0) {
+        if (!silentPull && output == music() && target->mNumberBuffers > 0 && target->mBuffers[0].mData && count > 0) {
             const float *samples = (const float *)target->mBuffers[0].mData;
-            if (fabsf(samples[0]) <= 1e-4f && fabsf(samples[count / 2]) <= 1e-4f && fabsf(samples[count - 1]) <= 1e-4f) {
+            if (fabsf(samples[0]) <= 1e-4f) {
                 bool hasSound = false;
-                for (UInt32 i = 0; i < count; i += 16) {
+                for (UInt32 i = 1; i < count; i++) {
                     if (fabsf(samples[i]) > 1e-4f) { hasSound = true; break; }
                 }
                 if (!hasSound) silentPull = true;
@@ -1328,6 +1328,8 @@ BOOL SGPlayerWatchMusicOutput(SGPlayerOutputWatcher watcher) {
 @implementation SGSpeedObserver {
     CFAbsoluteTime _lastRebufferTime;
     CFAbsoluteTime _stallStartedAt;
+    NSString *_currentTrack;
+    BOOL _hasPlayed;
 }
 
 - (void)playerStateDidChange:(SPTPlayerState *)state {}
@@ -1337,32 +1339,43 @@ BOOL SGPlayerWatchMusicOutput(SGPlayerOutputWatcher watcher) {
         _stallStartedAt = 0;
         return;
     }
+    NSString *track = trackOf(state);
+    if (![track isEqualToString:_currentTrack]) {
+        _currentTrack = [track copy];
+        _stallStartedAt = 0;
+        _hasPlayed = NO;
+    }
     static SEL isBuffering;
     if (!isBuffering) isBuffering = NSSelectorFromString(@"isBuffering");
     BOOL buffering = [state respondsToSelector:isBuffering] && [[state valueForKey:@"isBuffering"] boolValue];
     BOOL stalled = buffering || state.playbackSpeed == 0;
-    if (stalled) {
-        rearmClock();
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        if (_stallStartedAt == 0) {
-            _stallStartedAt = now;
-        } else if (now - _stallStartedAt >= 0.25 && now - _lastRebufferTime > 6.0) {
-            double position = sg_spotifyPosition;
-            if (position < 0) position = state.position;
-            double duration = [state respondsToSelector:@selector(duration)] ? state.duration : 0;
-            if (position >= 0 && (duration <= 0 || position < duration - 2.0)) {
-                id player = SGPlayer();
-                if ([player respondsToSelector:@selector(seekTo:)]) {
-                    _lastRebufferTime = now;
-                    _stallStartedAt = 0;
-                    SGLog(@"speed: recovering from buffer starvation at %.1fx; seeking Spotify to %.2fs to refill buffer",
-                          loadFloat(&sg_speedBits), position);
-                    [(id<SPTPlayer>)player seekTo:position];
-                }
+    if (!stalled) {
+        _stallStartedAt = 0;
+        _hasPlayed = YES;
+        return;
+    }
+    rearmClock();
+    // Only recover from starvation once track has actually played past initial launch/buffering
+    if (!_hasPlayed) return;
+
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (_stallStartedAt == 0) {
+        _stallStartedAt = now;
+    } else if (now - _stallStartedAt >= 0.5 && now - _lastRebufferTime > 8.0) {
+        sg_spotifyPosition = -1;
+        [state position];
+        double position = sg_spotifyPosition;
+        double duration = [state respondsToSelector:@selector(duration)] ? state.duration : 0;
+        if (position >= 1.0 && (duration <= 0 || position < duration - 2.0)) {
+            id player = SGPlayer();
+            if ([player respondsToSelector:@selector(seekTo:)]) {
+                _lastRebufferTime = now;
+                _stallStartedAt = 0;
+                SGLog(@"speed: recovering from buffer starvation at %.1fx; seeking Spotify to %.2fs to refill buffer",
+                      loadFloat(&sg_speedBits), position);
+                [(id<SPTPlayer>)player seekTo:position];
             }
         }
-    } else {
-        _stallStartedAt = 0;
     }
 }
 @end
