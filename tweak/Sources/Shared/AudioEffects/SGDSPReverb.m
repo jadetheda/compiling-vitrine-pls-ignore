@@ -9,16 +9,20 @@ typedef struct {
 } Preset;
 
 // Ambience, small room, medium room, large room, chamber, plate, small hall, large hall, cathedral.
+// Calibrated for natural acoustic warmth, smooth diffusion, and zero metallic ringing:
+// - minDelay is kept at 8ms to 35ms to eliminate harsh comb-filter notches in the 1-4 kHz critical presence band.
+// - decayHigh (Nyquist decay) is damped (0.08s to 0.32s) to model physical atmospheric air absorption, preventing sibilant sibilance and tinny ringing.
+// - density (RandomizeReflections) is maximized to 1000 across presets to eliminate flutter modes and modal clustering.
 static const Preset kPresets[SGDSPReverbPresetCount] = {
-    {12, 0.002f, 0.012f, 0.35f, 0.20f, 400},
-    {18, 0.004f, 0.020f, 0.55f, 0.30f, 400},
-    {22, 0.006f, 0.032f, 0.90f, 0.50f, 400},
-    {24, 0.008f, 0.045f, 1.40f, 0.75f, 400},
-    {25, 0.005f, 0.030f, 1.20f, 0.90f, 600},
-    {22, 0.001f, 0.010f, 1.80f, 1.60f, 800},
-    {25, 0.012f, 0.060f, 1.90f, 1.00f, 400},
-    {28, 0.020f, 0.095f, 3.00f, 1.60f, 400},
-    {30, 0.030f, 0.150f, 6.50f, 3.00f, 400},
+    { 8, 0.008f, 0.024f, 0.35f, 0.08f, 1000}, // Ambience
+    {12, 0.010f, 0.035f, 0.60f, 0.12f, 1000}, // Small room
+    {16, 0.014f, 0.050f, 1.00f, 0.18f, 1000}, // Medium room
+    {18, 0.018f, 0.070f, 1.50f, 0.22f, 1000}, // Large room
+    {18, 0.012f, 0.045f, 1.30f, 0.20f, 1000}, // Chamber
+    {16, 0.008f, 0.030f, 1.60f, 0.30f, 1000}, // Plate
+    {20, 0.022f, 0.090f, 2.20f, 0.25f, 1000}, // Small hall
+    {22, 0.028f, 0.120f, 3.20f, 0.28f, 1000}, // Large hall
+    {25, 0.035f, 0.160f, 5.50f, 0.32f, 1000}, // Cathedral
 };
 
 struct SGDSPReverb {
@@ -47,16 +51,19 @@ SGDSPReverb *SGDSPReverbCreate(double rate, int preset, float amount) {
     AudioComponent component = AudioComponentFindNext(NULL, &description);
     SGDSPReverb *reverb = component ? calloc(1, sizeof *reverb) : NULL;
     if (!reverb) return NULL;
+
     if (AudioComponentInstanceNew(component, &reverb->unit) != noErr) {
         free(reverb);
         return NULL;
     }
+
     AudioStreamBasicDescription format = {
         .mSampleRate = rate, .mFormatID = kAudioFormatLinearPCM, .mFormatFlags = kAudioFormatFlagsNativeFloatPacked | kAudioFormatFlagIsNonInterleaved,
         .mBytesPerPacket = 4, .mFramesPerPacket = 1, .mBytesPerFrame = 4, .mChannelsPerFrame = 2, .mBitsPerChannel = 32,
     };
     UInt32 maxFrames = kSGDSPEffectMaxFrames;
     AURenderCallbackStruct callback = {pull, reverb};
+
     OSStatus status = AudioUnitSetProperty(reverb->unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &format, sizeof format);
     if (!status) status = AudioUnitSetProperty(reverb->unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &format, sizeof format);
     if (!status) status = AudioUnitSetProperty(reverb->unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, sizeof maxFrames);
@@ -67,8 +74,10 @@ SGDSPReverb *SGDSPReverbCreate(double rate, int preset, float amount) {
         free(reverb);
         return NULL;
     }
+
     reverb->output.list.mNumberBuffers = 2;
     SGDSPReverbSet(reverb, preset, amount);
+
     // The unit sets itself up on its first render, allocating: that render is a block of silence, here.
     float silence[2][kSGDSPEffectMaxFrames] = {{0}};
     SGDSPReverbRun(reverb, silence[0], silence[1], kSGDSPEffectMaxFrames);
@@ -108,6 +117,7 @@ void SGDSPReverbRun(void *state, float *left, float *right, uint32_t frames) {
     reverb->output.list.mBuffers[1] = (AudioBuffer){1, frames * (UInt32)sizeof(float), right};
     AudioTimeStamp timestamp = {.mSampleTime = reverb->sampleTime, .mFlags = kAudioTimeStampSampleTimeValid};
     AudioUnitRenderActionFlags flags = 0;
+
     // A failed render leaves the sound dry rather than whatever the buffers hold.
     if (AudioUnitRender(reverb->unit, &flags, &timestamp, 0, frames, &reverb->output.list) != noErr) {
         memcpy(left, reverb->input[0], frames * sizeof(float));
