@@ -10,6 +10,7 @@
 //     PlayerHeader.x     glass behind the close and more buttons
 //     PlayerControls.x   previous, play and next as bare glyphs, shuffle and repeat hidden on request, monospaced times
 //     PlayerFooter.x     share gone, lyrics, Connect and queue as one row of three glyphs
+//     PlayerVolume.m     the volume slider between the controls and the footer: this iPhone's, or the Connect device's
 //     DJPlayer.x         the AI DJ's player (its own units): skip glyphs, a four glyph footer row, over the shared
 //                        play glyph, lowered row and Connect of PlayerControls.x and PlayerFooter.x
 //     PlayerCards.x      every card under the player collapsed, so the list closes up
@@ -121,6 +122,12 @@ BOOL SGRPlayerVolumeOn(void);
 BOOL SGRPlayerPlaceVolume(UIView *stack, UIView *controls, UIView *row, CGFloat margin);
 // Called after any slider's setValue:animated: (PlayerFooter.x), so the row follows its hidden system slider.
 void SGRPlayerVolumeSliderSet(UISlider *slider);
+// Spotify's Connect volume service (`_TtC18Connect_VolumeImpl10VolumeImpl`) and aggregator
+// (`_TtC22Connect_AggregatorImpl24ConnectAggregatorManager`), handed over from PlayerFooter.x so the row
+// shows and moves the Connect device's volume while one plays.
+void SGRPlayerConnectVolumeProvided(id volume);
+void SGRPlayerConnectAggregatorProvided(id aggregator);
+void SGRPlayerConnectEntityChanged(id aggregator, id entity);
 
 // Follow the cover (PlayerCoverAccent.x): the player's lit controls painted in the cover's color instead of the accent.
 // Off until switched on, read at launch. The cover's color (a gray one gives the accent back), and a paint of Spotify's

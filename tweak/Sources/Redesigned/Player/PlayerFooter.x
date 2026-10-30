@@ -486,11 +486,49 @@ static char kGlyphSeenKey;
     SGRPlayerVolumeSliderSet(self);
 }
 %end
+
+%hook _TtC18Connect_VolumeImpl17VolumeServiceImpl
+- (id)provideVolumeImpl {
+    id volume = %orig;
+    SGRPlayerConnectVolumeProvided(volume);
+    return volume;
+}
+%end
+
+%hook _TtC18Connect_VolumeImpl10VolumeImpl
+- (void)add:(id)observer {
+    %orig;
+    SGRPlayerConnectVolumeProvided(self);
+}
+%end
+
+%hook _TtC22Connect_AggregatorImpl24ConnectAggregatorService
+- (id)provideConnectAggregatorLegacyAPI {
+    id aggregator = %orig;
+    SGRPlayerConnectAggregatorProvided(aggregator);
+    return aggregator;
+}
+%end
+
+%hook _TtC18Connect_VolumeImpl21AggregatorEventSource
+- (void)aggregator:(id)aggregator didUpdateActiveConnectEntity:(id)entity {
+    %orig;
+    SGRPlayerConnectEntityChanged(aggregator, entity);
+}
+%end
 %end
 
 %ctor {
     if (!SGRedesignedUI()) return;
     %init;
-    if (SGRPlayerVolumeOn()) %init(VolumeSlider);
+    if (SGRPlayerVolumeOn()) {
+        %init(VolumeSlider);
+        SGRequireClasses(@[
+            @"_TtC18Connect_VolumeImpl10VolumeImpl",
+            @"_TtC18Connect_VolumeImpl17VolumeServiceImpl",
+            @"_TtC18Connect_VolumeImpl21AggregatorEventSource",
+            @"_TtC22Connect_AggregatorImpl24ConnectAggregatorService",
+        ]);
+    }
     SGRequireClasses(@[@"_TtC20NowPlaying_ModesImpl18FooterElementsUnit", @"SPTEncoreIconView"]);
 }

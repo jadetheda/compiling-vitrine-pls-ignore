@@ -1,8 +1,8 @@
 // Player redesign: a volume slider under the controls, as the Music app has. The row draws its own pill: it grows while
 // held, its glyphs move out, a drag anywhere on the row moves the volume by the finger's travel, and VoiceOver steps it.
-// Under it sits a hidden MPVolumeView whose slider the row reads and moves, so it is the system's volume: the hardware
-// buttons move it. A Connect device's own volume reaches Spotify, not iOS, so the row does not show it. No route
-// button: the footer's Connect glyph is the route.
+// Under it sits a hidden MPVolumeView whose slider the row reads and moves for this iPhone's volume; while a Connect
+// device with volume support plays, the row reads and moves Spotify's Connect volume instead, following its observer
+// callbacks and active-device changes as events. No route button: the footer's Connect glyph is the route.
 //
 // It sits in Spotify's bottom stack, outside its arranged views, between the controls and the footer row, so the
 // lyrics fade it with the rest of the stack (PlayerLyrics.x) and its touches stay inside the stack. The footer's
@@ -30,6 +30,67 @@ static const CGFloat kFillRest = 0.65, kFillHeld = 1, kEmpty = 0.24, kGlyphRest 
 
 static char kSessionContext;
 
+@protocol SGRConnectEntity <NSObject>
+- (BOOL)isSelf;
+- (BOOL)isVolumeSupported;
+- (NSString *)connectStateIdentifier;
+- (NSString *)localIdentifier;
+@end
+
+@protocol SGRConnectAggregator <NSObject>
+- (id)activeConnectEntity;
+- (BOOL)isPlayingRemotely;
+@end
+
+@protocol SGRConnectVolume <NSObject>
+- (double)connectVolume;
+- (void)add:(id)observer;
+- (void)setVolume:(double)volume reason:(NSString *)reason;
+@end
+
+@class SGRVolumeRow;
+
+static __weak id<SGRConnectVolume> s_connectVolume;
+static __weak id<SGRConnectAggregator> s_connectAggregator;
+static __weak id<SGRConnectEntity> s_connectEntity;
+static NSString *s_connectKey;
+static NSHashTable<SGRVolumeRow *> *s_rows;
+
+static id<SGRConnectEntity> activeConnectEntity(void) {
+    if (!s_connectVolume) return nil;
+    id<SGRConnectAggregator> aggregator = s_connectAggregator;
+    id<SGRConnectEntity> entity = [aggregator respondsToSelector:@selector(activeConnectEntity)]
+        ? [aggregator activeConnectEntity]
+        : s_connectEntity;
+    if (!entity) return nil;
+    if ([entity respondsToSelector:@selector(isSelf)] && [entity isSelf]) return nil;
+    if ([aggregator respondsToSelector:@selector(isPlayingRemotely)] && ![aggregator isPlayingRemotely]) return nil;
+    if ([entity respondsToSelector:@selector(isVolumeSupported)] && ![entity isVolumeSupported]) return nil;
+    return entity;
+}
+
+static NSString *activeConnectKey(void) {
+    id<SGRConnectEntity> entity = activeConnectEntity();
+    if (!entity) return nil;
+    if ([entity respondsToSelector:@selector(connectStateIdentifier)]) {
+        NSString *identifier = [entity connectStateIdentifier];
+        if (identifier.length) return identifier;
+    }
+    if ([entity respondsToSelector:@selector(localIdentifier)]) {
+        NSString *identifier = [entity localIdentifier];
+        if (identifier.length) return identifier;
+    }
+    return [NSString stringWithFormat:@"%p", entity];
+}
+
+static BOOL readConnectVolume(CGFloat *out) {
+    if (!activeConnectEntity() || ![s_connectVolume respondsToSelector:@selector(connectVolume)]) return NO;
+    double value = [s_connectVolume connectVolume];
+    if (!isfinite(value)) return NO;
+    *out = MIN(1, MAX(0, (CGFloat)value));
+    return YES;
+}
+
 static UIImageView *glyph(NSString *symbol) {
     UIImageSymbolConfiguration *configuration =
         [UIImageSymbolConfiguration configurationWithPointSize:kGlyphSize weight:UIImageSymbolWeightSemibold];
@@ -46,6 +107,8 @@ static UIImageView *glyph(NSString *symbol) {
 @property (nonatomic, weak) UIView *footer;
 - (UISlider *)systemSlider;
 - (void)systemSliderSet;
+- (void)connectVolumeChanged:(CGFloat)value;
+- (void)connectEntityChanged;
 @end
 
 // MPVolumeView makes its slider when it lays out and may make another later, for example after a route change, so the
@@ -75,6 +138,8 @@ static UIImageView *glyph(NSString *symbol) {
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if (!(self = [super initWithFrame:frame])) return nil;
+    if (!s_rows) s_rows = [NSHashTable weakObjectsHashTable];
+    [s_rows addObject:self];
     // Only plumbing: the slider inside moves the system's volume, nobody sees or touches the view.
     _system = [SGRVolumeView new];
 #pragma clang diagnostic push
@@ -100,7 +165,8 @@ static UIImageView *glyph(NSString *symbol) {
     [self addSubview:_quiet];
     [self addSubview:_loud];
 
-    _value = AVAudioSession.sharedInstance.outputVolume;
+    CGFloat remote;
+    _value = readConnectVolume(&remote) ? remote : AVAudioSession.sharedInstance.outputVolume;
     [AVAudioSession.sharedInstance addObserver:self forKeyPath:@"outputVolume" options:NSKeyValueObservingOptionNew
                                        context:&kSessionContext];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(refreshFromSystem)
@@ -150,14 +216,30 @@ static UIImageView *glyph(NSString *symbol) {
 }
 
 - (void)refreshFromSystem {
-    // Not while the finger is on it, nor just after it let go: the system settles on its own steps a moment later.
+    // Not while the finger is on it, nor just after it let go: the system or Connect device settles a moment later.
     if (_held || CACurrentMediaTime() - _lastPush < 0.6) return;
-    UISlider *slider = [self systemSlider];
-    CGFloat system = slider ? slider.value : AVAudioSession.sharedInstance.outputVolume;
-    if (fabs(system - _value) > 0.002) [self setValue:system fromUser:NO];
+    CGFloat current;
+    if (!readConnectVolume(&current)) {
+        UISlider *slider = [self systemSlider];
+        current = slider ? slider.value : AVAudioSession.sharedInstance.outputVolume;
+    }
+    if (fabs(current - _value) > 0.002) [self setValue:current fromUser:NO];
 }
 
-// The KVO the system sends as it settles falls inside the guard above, so the row reads it once the guard has passed.
+- (void)connectVolumeChanged:(CGFloat)value {
+    if (!activeConnectEntity() || !isfinite(value)) return;
+    if (_held || CACurrentMediaTime() - _lastPush < 0.6) return;
+    value = MIN(1, MAX(0, value));
+    if (fabs(value - _value) > 0.002) [self setValue:value fromUser:NO];
+}
+
+- (void)connectEntityChanged {
+    _lastPush = 0;
+    if (_held) [self setHeld:NO];
+    [self refreshFromSystem];
+}
+
+// The KVO or Connect update sent as the volume settles falls inside the guard above, so the row reads it once the guard has passed.
 - (void)refreshAfterPush {
     __weak SGRVolumeRow *weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -166,6 +248,11 @@ static UIImageView *glyph(NSString *symbol) {
 }
 
 - (void)pushVolume {
+    if (activeConnectEntity() && [s_connectVolume respondsToSelector:@selector(setVolume:reason:)]) {
+        _lastPush = CACurrentMediaTime();
+        [s_connectVolume setVolume:_value reason:@"DevicePickerUIImpl"];
+        return;
+    }
     UISlider *slider = [self systemSlider];
     if (!slider) return;
     _lastPush = CACurrentMediaTime();
@@ -318,6 +405,82 @@ static UIImageView *glyph(NSString *symbol) {
 }
 
 @end
+
+static void onMain(dispatch_block_t block) {
+    if (NSThread.isMainThread) block();
+    else dispatch_async(dispatch_get_main_queue(), block);
+}
+
+// Registered on Spotify's VolumeImpl (`add:`): its observer manager dispatches `SPTConnectVolumeObserver` calls on the
+// main queue when the Connect device's volume changes.
+@interface SGRConnectVolumeObserver : NSObject
+@end
+
+@implementation SGRConnectVolumeObserver
+
++ (void)initialize {
+    if (self != SGRConnectVolumeObserver.class) return;
+    Protocol *protocol = objc_getProtocol("SPTConnectVolumeObserver");
+    if (protocol) class_addProtocol(self, protocol);
+}
+
+- (void)connectVolumeDidChangeToValue:(double)value {
+    onMain(^{
+        for (SGRVolumeRow *row in s_rows) [row connectVolumeChanged:value];
+    });
+}
+
+- (void)remoteMediaSessionVolumeDidChangeToValue:(double)value {
+}
+
+- (void)groupedDeviceVolumeDidChangeToValue:(double)value groupDeviceIdentifier:(NSString *)identifier {
+}
+
+@end
+
+static SGRConnectVolumeObserver *connectObserver(void) {
+    static SGRConnectVolumeObserver *observer;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ observer = [SGRConnectVolumeObserver new]; });
+    return observer;
+}
+
+static void syncConnectDevice(void) {
+    NSString *key = activeConnectKey();
+    BOOL switched = (key != s_connectKey) && ![key isEqualToString:s_connectKey];
+    s_connectKey = [key copy];
+    for (SGRVolumeRow *row in s_rows) {
+        if (switched) [row connectEntityChanged];
+        else [row refreshFromSystem];
+    }
+}
+
+void SGRPlayerConnectVolumeProvided(id volume) {
+    if (!volume) return;
+    onMain(^{
+        if (volume == s_connectVolume) return;
+        s_connectVolume = volume;
+        if ([volume respondsToSelector:@selector(add:)]) [volume add:connectObserver()];
+        syncConnectDevice();
+    });
+}
+
+void SGRPlayerConnectAggregatorProvided(id aggregator) {
+    if (!aggregator) return;
+    onMain(^{
+        if (aggregator == s_connectAggregator) return;
+        s_connectAggregator = aggregator;
+        syncConnectDevice();
+    });
+}
+
+void SGRPlayerConnectEntityChanged(id aggregator, id entity) {
+    onMain(^{
+        if (aggregator) s_connectAggregator = aggregator;
+        s_connectEntity = entity;
+        syncConnectDevice();
+    });
+}
 
 static char kVolumeKey, kPlayKey, kSettleKey;
 // Passes the footer's layout is asked for again while the row's place keeps changing, at most.
