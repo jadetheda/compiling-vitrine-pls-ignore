@@ -500,11 +500,11 @@ void SGRPlayerVisualiserUpdate(void) {
     if (made) sg_view = [[SGRVisualiserView alloc] initWithFrame:CGRectZero];
     layOut(field);
     if (made) {
-        [sg_view setBlurred:SGRPlayerLyricsOpen() animated:NO];
+        [sg_view setBlurred:SGRPlayerLyricsOpen() || SGRPlayerQueueOpen() animated:NO];
         [sg_view appear:field.window != nil];
         SGLog(@"redesign player: visualizer on the field");
     } else {
-        BOOL open = SGRPlayerLyricsOpen();
+        BOOL open = SGRPlayerLyricsOpen() || SGRPlayerQueueOpen();
         if (open != sg_view.blurred) [sg_view setBlurred:open animated:sg_view.window != nil];
     }
 }

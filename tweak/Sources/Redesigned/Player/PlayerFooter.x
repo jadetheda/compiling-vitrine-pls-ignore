@@ -55,8 +55,9 @@ static const CGFloat kVolumeLift = 10;
 // "airplayaudio" is the name iOS 16 knows; iOS 18 calls it airplay.audio and keeps this one as its alias.
 static NSString *const kConnectSymbol = @"airplayaudio", *const kQueueSymbol = @"list.bullet";
 
-static char kConnectKey, kShareKey, kTrimmerKey, kSharedByKey, kQueueKey, kQueueIconKey, kLyricsGlyphKey, kReachKey, kRowKey;
+static char kConnectKey, kShareKey, kTrimmerKey, kSharedByKey, kQueueKey, kQueueIconKey, kLyricsGlyphKey, kQueueGlyphKey, kReachKey, kRowKey;
 static __weak SGRGlyphButton *sg_lyricsGlyph;
+static __weak SGRGlyphButton *sg_queueGlyph;
 
 // The view the footer's stack view arranges around `view`.
 static UIView *arrangedAround(UIView *view, UIView *host) {
@@ -113,6 +114,35 @@ SGRGlyphButton *SGRPlayerLyricsGlyphIn(UIView *host) {
     }
     if (glyph.superview != host) [host addSubview:glyph];
     sg_lyricsGlyph = glyph;
+    return glyph;
+}
+
+#pragma mark - queue
+
+void SGRPlayerQueueChanged(void) {
+    SGRPlayerMotionLyricsChanged();
+    SGRPlayerVisualiserUpdate();
+    SGRGlyphButton *glyph = sg_queueGlyph;
+    if (!glyph) return;
+    BOOL open = SGRPlayerQueueOpen();
+    BOOL animated = glyph.window && !SGRPlayerIsTransitioning();
+    void (^mark)(void) = ^{
+        glyph.glyph.tintColor = open ? SGRPrimary() : SGRSecondary();
+    };
+    if (animated) SGRAnimate(SGRMotionFade, mark, nil);
+    else mark();
+}
+
+SGRGlyphButton *SGRPlayerQueueGlyphIn(UIView *host) {
+    SGRGlyphButton *glyph = objc_getAssociatedObject(host, &kQueueGlyphKey);
+    if (!glyph) {
+        glyph = [SGRGlyphButton buttonWithSymbol:kQueueSymbol pointSize:kLyricsGlyphSize title:@"Queue"];
+        glyph.glyph.tintColor = SGRPlayerQueueOpen() ? SGRPrimary() : SGRSecondary();
+        glyph.onTap = ^{ SGRPlayerToggleQueue(); };
+        objc_setAssociatedObject(host, &kQueueGlyphKey, glyph, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (glyph.superview != host) [host addSubview:glyph];
+    sg_queueGlyph = glyph;
     return glyph;
 }
 
@@ -433,8 +463,13 @@ void SGRPlayerLowerRow(UIView *row) {
     CGFloat connectFrom = glyph ? moveTo(arrangedAround(connect, host), glyph, CGPointMake(CGRectGetMidX(glyph.bounds), CGRectGetMidY(glyph.bounds)), host, round(width * kMiddle)) : -1;
 
     UIView *queue = SGRFindByIdentifier(host, @"QueueButtonNowPlaying", &kQueueKey);
-    standInForQueue((SPTEncoreIconView *)SGRFindByIdentifier(queue, @"Encore.IconView", &kQueueIconKey));
-    CGFloat queueFrom = moveTo(arrangedAround(queue, host), queue, CGPointMake(CGRectGetMidX(queue.bounds), CGRectGetMidY(queue.bounds)), host, round(width * (rtl ? kLeading : kTrailing)));
+    SGRPlayerVanish(queue);
+    SGRPlayerVanish(arrangedAround(queue, host));
+
+    SGRGlyphButton *queueButton = SGRPlayerQueueGlyphIn(host);
+    queueButton.bounds = CGRectMake(0, 0, 44, 44);
+    queueButton.center = CGPointMake(round(width * (rtl ? kLeading : kTrailing)), middleY);
+    SGRPlayerQueueChanged();
 
     SGRPlayerLowerRow(host);
     SGRPlayerCoverConnect(arrangedAround(connect, host), glyph);
@@ -442,7 +477,7 @@ void SGRPlayerLowerRow(UIView *row) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         SGLog(@"redesign player: footer lyrics at %.0f, connect %.0f (%@) to %.0f, queue %.0f to %.0f, share %@", lyrics.center.x,
-              connectFrom, glyph ? @"glyph" : @"button", round(width * kMiddle), queueFrom, round(width * (rtl ? kLeading : kTrailing)), share ? @"gone" : @"not found");
+              connectFrom, glyph ? @"glyph" : @"button", round(width * kMiddle), queueButton.center.x, round(width * (rtl ? kLeading : kTrailing)), share ? @"gone" : @"not found");
     });
 }
 %end

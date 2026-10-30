@@ -29,6 +29,7 @@
 #import "Redesigned/Kit/SGRKit.h"
 #import "Redesigned/Lyrics/SGRKaraokeView.h"
 #import "Redesigned/Lyrics/SGRSingButton.h"
+#import "SGRQueueView.h"
 #import "Settings/SGPageStyle.h"
 #import "Shared/Sing/Sing.h"
 #import "Shared/Lyrics/Lyrics.h"
@@ -56,7 +57,16 @@ static const CGFloat kLivingHeight = 200;
 static const NSTimeInterval kRest = 4;
 
 static char kOverlayKey, kPlateKey, kTitleKey, kStackKey;
-static BOOL sg_open;
+typedef NS_ENUM(NSInteger, SGRPlayerInlineMode) {
+    SGRPlayerInlineModeNone = 0,
+    SGRPlayerInlineModeLyrics,
+    SGRPlayerInlineModeQueue,
+};
+static SGRPlayerInlineMode sg_inlineMode = SGRPlayerInlineModeNone;
+
+static inline BOOL isStageOpen(void) {
+    return sg_inlineMode != SGRPlayerInlineModeNone;
+}
 static BOOL sg_moving;                      // the transition is in flight, so no layout pass may re-place it
 static __weak UIView *sg_host;              // SPTNowPlayingView
 static __weak UIViewController *sg_info, *sg_duration, *sg_floating, *sg_header;
@@ -87,12 +97,14 @@ static BOOL keepsTitle(void) {
 @property (nonatomic, readonly) UIImageView *cover;
 @property (nonatomic, readonly) UIView *stage;       // holds the lines' view alone
 @property (nonatomic, readonly) SGRKaraokeView *lyrics;
+@property (nonatomic, readonly) SGRQueueView *queue;
 @end
 
 @implementation SGRPlayerLyricsOverlay {
     UIView *_thumb, *_stage;
     UIImageView *_cover;
     SGRKaraokeView *_lyrics;
+    SGRQueueView *_queue;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -117,7 +129,10 @@ static BOOL keepsTitle(void) {
 
 - (void)sgr_thumbTapped {
     // Left on screen while the lines are alone (keepsTitle), a tap on it only wakes the controls (SGRPlayerWake).
-    if (SGRPlayerLyricsOpen() && !sg_moving && !sg_alone) SGRPlayerToggleLyrics();
+    if (isStageOpen() && !sg_moving && !sg_alone) {
+        if (SGRPlayerLyricsOpen()) SGRPlayerToggleLyrics();
+        else if (SGRPlayerQueueOpen()) SGRPlayerToggleQueue();
+    }
 }
 
 - (UIView *)thumb { return _thumb; }
@@ -135,7 +150,7 @@ static BOOL keepsTitle(void) {
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     if (hit != self) return hit;
-    UIView *row = SGRPlayerLyricsOpen() && (!sg_alone || keepsTitle()) ? sg_info.viewIfLoaded : nil;
+    UIView *row = isStageOpen() && (!sg_alone || keepsTitle()) ? sg_info.viewIfLoaded : nil;
     UIView *inRow = row ? [row hitTest:[row convertPoint:point fromView:self] withEvent:event] : nil;
     return inRow == row ? nil : inRow;
 }
@@ -153,6 +168,16 @@ static BOOL keepsTitle(void) {
     if (_lyrics.superview != _stage) [_stage addSubview:_lyrics];
     _lyrics.frame = _stage.bounds;
     return _lyrics;
+}
+
+- (SGRQueueView *)queue {
+    if (!_queue) {
+        _queue = [[SGRQueueView alloc] initWithFrame:_stage.bounds];
+        _queue.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    }
+    if (_queue.superview != _stage) [_stage addSubview:_queue];
+    _queue.frame = _stage.bounds;
+    return _queue;
 }
 
 @end
@@ -262,7 +287,7 @@ static void placeTitleRow(SGRLyricsLayout l) {
     UIView *info = sg_info.viewIfLoaded;
     if (!info) return;
     [SGRowIn(info) layoutIfNeeded];
-    CGFloat lift = sg_open ? l.lift : 0, shift = sg_open ? l.shift : 0;
+    CGFloat lift = isStageOpen() ? l.lift : 0, shift = isStageOpen() ? l.shift : 0;
     CGAffineTransform rise = CGAffineTransformMakeTranslation(0, round(lift));
     if (!CGAffineTransformEqualToTransform(info.transform, rise)) info.transform = rise;
     UIView *title = sg_titleElement;
@@ -271,7 +296,7 @@ static void placeTitleRow(SGRLyricsLayout l) {
     if (!CGAffineTransformEqualToTransform(title.transform, slide)) title.transform = slide;
     // Closed it reaches as far as Spotify meant it to; moved, only as far as the controls it moved toward.
     CGFloat room = CGFLOAT_MAX;
-    if (sg_open) room = trailingEdgeIn(info) - kTitleGap - (CGRectGetMinX(untransformed(title, info)) + shift);
+    if (isStageOpen()) room = trailingEdgeIn(info) - kTitleGap - (CGRectGetMinX(untransformed(title, info)) + shift);
     clipTitle(title, room);
 }
 
@@ -283,7 +308,11 @@ BOOL SGRPlayerLyricsAvailable(void) {
 }
 
 BOOL SGRPlayerLyricsOpen(void) {
-    return sg_open;
+    return sg_inlineMode == SGRPlayerInlineModeLyrics;
+}
+
+BOOL SGRPlayerQueueOpen(void) {
+    return sg_inlineMode == SGRPlayerInlineModeQueue;
 }
 
 // Puts the overlay's own views where the measurements say, without animating. The thumbnail is laid out
@@ -419,7 +448,7 @@ static BOOL coveredBySheet(void) {
 static BOOL mayCount(void) {
     SPTPlayerState *state = SGPlayerState();
     UIView *host = sg_host;
-    return SGRLyricsHideMode() != SGRLyricsHideOff && sg_open && !sg_alone && !sg_touching && host.window && state && !state.isPaused
+    return SGRLyricsHideMode() != SGRLyricsHideOff && SGRPlayerLyricsOpen() && !sg_alone && !sg_touching && host.window && state && !state.isPaused
         && !UIAccessibilityIsVoiceOverRunning()
         && UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
 }
@@ -529,7 +558,7 @@ static void restartRest(void) {
 
 static void setAlone(BOOL alone, BOOL animated) {
     UIView *host = sg_host;
-    if (alone == sg_alone || !host || (alone && !sg_open)) return;
+    if (alone == sg_alone || !host || (alone && !SGRPlayerLyricsOpen())) return;
     SGRLyricsLayout l = layoutIn(host);
     // Going alone needs somewhere to put the lines. Coming back never waits for it: the controls and the
     // lines' tap are given back even when the player can no longer be measured.
@@ -583,59 +612,114 @@ static void setAlone(BOOL alone, BOOL animated) {
     SGLog(@"redesign player: the lines %@", alone ? @"on their own" : @"with the controls");
 }
 
-static void setOpen(BOOL open, BOOL animated) {
+static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
     UIView *host = sg_host;
-    if (open == sg_open) return;
+    if (targetMode == sg_inlineMode) return;
     if (!host) {
-        SGLog(@"redesign player: the lyrics were asked for before the player laid out");
+        SGLog(@"redesign player: the stage was asked for before the player laid out");
         return;
     }
     SGRLyricsLayout l = layoutIn(host);
-    if (open && !l.ok) {
-        SGLog(@"redesign player: the lyrics have nowhere to go (stage %.0fx%.0f, lift %.0f)", l.stage.size.width, l.stage.size.height, l.lift);
+    if (targetMode != SGRPlayerInlineModeNone && !l.ok) {
+        SGLog(@"redesign player: the stage has nowhere to go (stage %.0fx%.0f, lift %.0f)", l.stage.size.width, l.stage.size.height, l.lift);
         return;
     }
-    // The thumbnail is the Kit's picture drawn again, and Spotify's cover goes as it appears: without a
-    // picture there would be a hole where the cover was, so the cover stays and the lyrics wait.
     UIImage *picture = SGRNowPlayingArtwork(NULL, NULL);
-    if (open && !picture) {
-        SGLog(@"redesign player: no artwork read yet, the lyrics stay down");
+    if (targetMode != SGRPlayerInlineModeNone && !picture) {
+        SGLog(@"redesign player: no artwork read yet, stage stays down");
         return;
     }
-    if (!open) setAlone(NO, NO);
-    sg_open = open;
-    SGRPlayerLyricsChanged();
 
     SGRPlayerLyricsOverlay *overlay = overlayIn(host);
+
+    // Cross-switch between Lyrics and Queue while stage is already active
+    if (isStageOpen() && targetMode != SGRPlayerInlineModeNone) {
+        if (sg_alone) setAlone(NO, animated);
+        sg_inlineMode = targetMode;
+        SGRPlayerLyricsChanged();
+        SGRPlayerQueueChanged();
+
+        if (targetMode == SGRPlayerInlineModeQueue) {
+            overlay.queue.hidden = NO;
+            overlay.queue.frame = overlay.stage.bounds;
+            [overlay.queue reloadTracks];
+            void (^swap)(void) = ^{
+                overlay.queue.alpha = 1;
+                overlay.lyrics.alpha = 0;
+            };
+            void (^done)(BOOL) = ^(BOOL finished) {
+                if (sg_inlineMode == SGRPlayerInlineModeQueue) overlay.lyrics.hidden = YES;
+            };
+            if (animated && !SGRReduceMotion()) {
+                [UIView animateWithDuration:kLyricsIn delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:swap completion:done];
+            } else {
+                swap();
+                done(YES);
+            }
+            [sg_rest invalidate];
+            sg_rest = nil;
+        } else {
+            overlay.lyrics.hidden = NO;
+            void (^swap)(void) = ^{
+                overlay.lyrics.alpha = 1;
+                overlay.queue.alpha = 0;
+            };
+            void (^done)(BOOL) = ^(BOOL finished) {
+                if (sg_inlineMode == SGRPlayerInlineModeLyrics) overlay.queue.hidden = YES;
+            };
+            if (animated && !SGRReduceMotion()) {
+                [UIView animateWithDuration:kLyricsIn delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:swap completion:done];
+            } else {
+                swap();
+                done(YES);
+            }
+            restartRest();
+        }
+        return;
+    }
+
+    BOOL open = (targetMode != SGRPlayerInlineModeNone);
+    if (!open) setAlone(NO, NO);
+    sg_inlineMode = targetMode;
+    SGRPlayerLyricsChanged();
+    SGRPlayerQueueChanged();
+
     place(overlay, host, l);
     CGAffineTransform away = thumbTransform(l);
-    // Over an animated artwork the cover is hidden, so the thumbnail fades where it sits rather than flying
-    // to or from an empty slot.
     BOOL fades = SGRPlayerMotionShowing();
-    // The state it starts from, so the animation has both ends of every value and nothing jumps into it.
+
     overlay.thumb.transform = open && !fades ? CGAffineTransformIdentity : away;
     overlay.thumb.alpha = open && fades ? 0 : 1;
     overlay.cover.layer.cornerRadius = thumbRadius(l, fades || !open);
-    // Under Reduce Motion the lines only fade, without growing.
+
     CGAffineTransform entering = SGRReduceMotion() ? CGAffineTransformIdentity : CGAffineTransformMakeScale(kLyricsEnterScale, kLyricsEnterScale);
+
     if (open) {
         overlay.cover.image = SGRNowPlayingArtwork(NULL, NULL);
         overlay.stage.alpha = 0;
         overlay.stage.transform = entering;
-        // Once a drag, as it starts: the lines resize then and not again under the finger. Scrolling on hides,
-        // not under VoiceOver, which keeps the controls up, nor under a sheet; scrolling back brings them back.
-        overlay.lyrics.browsingBegan = ^(BOOL onward) {
-            if (!onward) setAlone(NO, YES);
-            else if (!UIAccessibilityIsVoiceOverRunning() && !coveredBySheet()) setAlone(YES, YES);
-        };
-        // Spotify's cover goes the moment the redesign's own takes its place: the same picture at the
-        // same size with the same corners, so there is nothing to see in the swap. Coming back it waits
-        // for the thumbnail to land on it, or the two would be on screen at once, one of them half size.
+
+        if (targetMode == SGRPlayerInlineModeLyrics) {
+            overlay.lyrics.hidden = NO;
+            overlay.lyrics.alpha = 1;
+            overlay.queue.hidden = YES;
+            overlay.queue.alpha = 0;
+            overlay.lyrics.browsingBegan = ^(BOOL onward) {
+                if (!onward) setAlone(NO, YES);
+                else if (!UIAccessibilityIsVoiceOverRunning() && !coveredBySheet()) setAlone(YES, YES);
+            };
+        } else {
+            overlay.queue.hidden = NO;
+            overlay.queue.alpha = 1;
+            overlay.lyrics.hidden = YES;
+            overlay.lyrics.alpha = 0;
+            overlay.queue.frame = overlay.stage.bounds;
+            [overlay.queue reloadTracks];
+        }
+
         SGRPlayerCoverList().alpha = 0;
     }
 
-    // Moves and fades apart, as in setAlone: Reduce Motion takes the move and keeps the thumbnail's fade over
-    // an animated artwork and the chips'.
     void (^move)(void) = ^{
         overlay.thumb.transform = open || fades ? away : CGAffineTransformIdentity;
         overlay.cover.layer.cornerRadius = thumbRadius(l, open || fades);
@@ -651,7 +735,7 @@ static void setOpen(BOOL open, BOOL animated) {
     };
     void (^settled)(BOOL) = ^(BOOL finished) {
         sg_moving = NO;
-        if (sg_open) return;   // opened again while it was going away
+        if (isStageOpen()) return;
         SGRPlayerCoverList().alpha = 1;
         [overlay removeFromSuperview];
     };
@@ -663,48 +747,60 @@ static void setOpen(BOOL open, BOOL animated) {
         settled(YES);
     } else {
         sg_moving = YES;
-        // Settled once both the layout transition and the fade are done.
         __block NSInteger running = 2;
         void (^done)(BOOL) = ^(BOOL finished) {
             if (--running == 0) settled(finished);
         };
         SGRAnimateLayout(host, move, done);
         SGRAnimate(SGRMotionFade, fade, done);
-        // The lines come in behind the cover leaving, and go before it comes back.
+
         [UIView animateWithDuration:open ? kLyricsIn : kLyricsOut delay:open ? kLyricsInDelay : 0
                             options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState
                          animations:show completion:nil];
     }
-    if (open) restartRest();
+
+    if (open && targetMode == SGRPlayerInlineModeLyrics) restartRest();
     else {
         [sg_rest invalidate];
         sg_rest = nil;
     }
-    SGLog(@"redesign player: lyrics %@, thumbnail %.0fx%.0f at %.0f,%.0f, title row up %.0f and right %.0f, lines %.0fx%.0f",
-          open ? @"up" : @"away", l.thumb.size.width, l.thumb.size.height, l.thumb.origin.x, l.thumb.origin.y,
+    SGLog(@"redesign player: inline mode %ld, thumbnail %.0fx%.0f at %.0f,%.0f, title row up %.0f and right %.0f, stage %.0fx%.0f",
+          (long)targetMode, l.thumb.size.width, l.thumb.size.height, l.thumb.origin.x, l.thumb.origin.y,
           -l.lift, l.shift, l.stage.size.width, l.stage.size.height);
 }
 
 void SGRPlayerToggleLyrics(void) {
-    if (!sg_open && !SGRPlayerLyricsAvailable()) return;
-    setOpen(!sg_open, YES);
+    if (sg_inlineMode == SGRPlayerInlineModeLyrics) {
+        setMode(SGRPlayerInlineModeNone, YES);
+    } else {
+        if (!SGRPlayerLyricsAvailable()) return;
+        setMode(SGRPlayerInlineModeLyrics, YES);
+    }
 }
 
-// A layout pass, a new track or a turn of the phone: the state is put back where it belongs without
-// animating, since the frames it is measured from have just changed.
+void SGRPlayerToggleQueue(void) {
+    if (sg_inlineMode == SGRPlayerInlineModeQueue) {
+        setMode(SGRPlayerInlineModeNone, YES);
+    } else {
+        setMode(SGRPlayerInlineModeQueue, YES);
+    }
+}
+
 static void replace(void) {
     UIView *host = sg_host;
     if (!host || sg_moving) return;   // a pass in the middle of the transition would cut it short
-    // Closed, placeTitleRow reads nothing of the layout, so the cover is not measured for it.
-    SGRLyricsLayout l = sg_open ? layoutIn(host) : (SGRLyricsLayout){0};
-    if (sg_open && !l.ok) return;
+
+    BOOL stageOpen = isStageOpen();
+    SGRLyricsLayout l = stageOpen ? layoutIn(host) : (SGRLyricsLayout){0};
+    if (stageOpen && !l.ok) return;
     placeTitleRow(l);
-    sg_floating.viewIfLoaded.alpha = sg_open ? 0 : 1;
-    if (!sg_open) return;
+    sg_floating.viewIfLoaded.alpha = stageOpen ? 0 : 1;
+    if (!stageOpen) return;
+
     SGRPlayerLyricsOverlay *overlay = objc_getAssociatedObject(host, &kOverlayKey);
     if (!overlay.superview) return;
     if (overlay.superview == host && host.subviews.lastObject != overlay) [host bringSubviewToFront:overlay];
-    if (sg_alone) {
+    if (sg_alone && sg_inlineMode == SGRPlayerInlineModeLyrics) {
         CGRect stage = l.stage;
         l.stage = aloneStage(host, l);
         overlay.lyrics.seeksBelow = CGRectGetMinY(stage) - CGRectGetMinY(l.stage);
@@ -714,7 +810,8 @@ static void replace(void) {
     place(overlay, host, l);
     overlay.thumb.transform = thumbTransform(l);
     overlay.cover.layer.cornerRadius = thumbRadius(l, YES);
-    overlay.lyrics.frame = overlay.stage.bounds;
+    if (sg_inlineMode == SGRPlayerInlineModeLyrics) overlay.lyrics.frame = overlay.stage.bounds;
+    else if (sg_inlineMode == SGRPlayerInlineModeQueue) overlay.queue.frame = overlay.stage.bounds;
     SGRPlayerCoverList().alpha = 0;
 }
 
@@ -739,7 +836,7 @@ static void replace(void) {
 
 // The bar morphs back out of a full size cover as the player closes, so the thumbnail is put away first.
 - (void)viewWillDisappear:(BOOL)animated {
-    if (sg_open) setOpen(NO, NO);
+    if (isStageOpen()) setMode(SGRPlayerInlineModeNone, NO);
     // The landscape screen outlives the lines for a track without lyrics, but not the player.
     SGRPlayerShowLandscape(NO);
     %orig;
@@ -875,18 +972,22 @@ static void durationUnitLaidOut(UIViewController *unit) {
 
 // The lines go once the grace is over and nothing is looking for the track's own any more.
 - (void)closeIfNone {
-    if (!_graceOver || !sg_open || SGRPlayerLyricsAvailable() || SGKaraokeLooking(SGKaraokePlayingTrack())) return;
+    if (!_graceOver || sg_inlineMode != SGRPlayerInlineModeLyrics || SGRPlayerLyricsAvailable() || SGKaraokeLooking(SGKaraokePlayingTrack())) return;
     SGLog(@"redesign player: no lyrics for the track that came on, the cover is back");
-    setOpen(NO, YES);
+    setMode(SGRPlayerInlineModeNone, YES);
 }
 
 - (void)playerStateDidChange:(SPTPlayerState *)state {
+    if (sg_inlineMode == SGRPlayerInlineModeQueue) {
+        SGRPlayerLyricsOverlay *overlay = objc_getAssociatedObject(sg_host, &kOverlayKey);
+        [overlay.queue updateWithState:state];
+    }
     // A pause brings the controls back and keeps them; playing again starts the clock.
     if (state.isPaused) {
         setAlone(NO, YES);
         [sg_rest invalidate];
         sg_rest = nil;
-    } else if (!sg_rest && !sg_alone) {
+    } else if (!sg_rest && !sg_alone && sg_inlineMode == SGRPlayerInlineModeLyrics) {
         restartRest();
     }
     NSString *track = SGURIString(state.track.URI);
@@ -894,6 +995,7 @@ static void durationUnitLaidOut(UIViewController *unit) {
     _track = track;
     _graceOver = NO;
     SGRPlayerLyricsChanged();
+    SGRPlayerQueueChanged();
     // The lines already up wait out a grace for the new track's before they go, a track after it its own.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLyricsGrace * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (![self->_track isEqualToString:track]) return;
@@ -943,7 +1045,7 @@ BOOL SGRPlayerLyricsNone(void) {
         restartRest();
     }];
     [NSNotificationCenter.defaultCenter addObserverForName:SGRNowPlayingArtworkDidChangeNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
-        if (!sg_open) return;
+        if (!isStageOpen()) return;
         SGRPlayerLyricsOverlay *overlay = objc_getAssociatedObject(sg_host, &kOverlayKey);
         overlay.cover.image = SGRNowPlayingArtwork(NULL, NULL);
     }];

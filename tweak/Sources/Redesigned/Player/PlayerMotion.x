@@ -648,7 +648,7 @@ static void show(NSString *track, NSURL *file) {
         sg_motionPoster = poster;
         layOut();
         holdField();
-        [sg_motion setBlurred:SGRPlayerLyricsOpen() animated:NO];
+        [sg_motion setBlurred:SGRPlayerLyricsOpen() || SGRPlayerQueueOpen() animated:NO];
         BOOL animated = seen(sg_motion);
         [motion appear:animated then:^{
             if (sg_motion == motion) cover(YES);
@@ -659,7 +659,7 @@ static void show(NSString *track, NSURL *file) {
 }
 
 void SGRPlayerMotionLyricsChanged(void) {
-    [sg_motion setBlurred:SGRPlayerLyricsOpen() animated:sg_motion.window != nil];
+    [sg_motion setBlurred:SGRPlayerLyricsOpen() || SGRPlayerQueueOpen() animated:sg_motion.window != nil];
 }
 
 static void videoSurface(id unit, BOOL attached) {

@@ -94,6 +94,20 @@ void SGRPlayerLyricsChanged(void);
 // SGRPlayerLyricsChanged, which is the footer on screen: each layout of a footer asks again.
 @class SGRGlyphButton;
 SGRGlyphButton *SGRPlayerLyricsGlyphIn(UIView *host);
+
+#pragma mark - the queue in the player (PlayerLyrics.x / PlayerFooter.x)
+
+// Whether the player is showing the inline Up Next queue.
+BOOL SGRPlayerQueueOpen(void);
+
+// Toggles the inline queue on and off; transitions directly between lyrics and queue when lyrics are open.
+void SGRPlayerToggleQueue(void);
+
+// Notifies footer and visual components that queue state changed.
+void SGRPlayerQueueChanged(void);
+
+// The queue glyph of the footer, made on first ask in `host`.
+SGRGlyphButton *SGRPlayerQueueGlyphIn(UIView *host);
 // An Endless_DJMusicImpl class of the AI DJ's player by its Swift name, under the mangled spelling or the
 // dotted one the trees print; nil when the app has neither.
 static inline Class SGRDJClass(NSString *name) {
