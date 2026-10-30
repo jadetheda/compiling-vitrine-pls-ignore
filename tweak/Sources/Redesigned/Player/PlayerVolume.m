@@ -54,6 +54,7 @@ static __weak id<SGRConnectVolume> s_connectVolume;
 static __weak id<SGRConnectAggregator> s_connectAggregator;
 static __weak id<SGRConnectEntity> s_connectEntity;
 static NSString *s_connectKey;
+static CGFloat s_cachedConnectVolume = -1;
 static NSHashTable<SGRVolumeRow *> *s_rows;
 
 static id<SGRConnectEntity> activeConnectEntity(void) {
@@ -84,10 +85,17 @@ static NSString *activeConnectKey(void) {
 }
 
 static BOOL readConnectVolume(CGFloat *out) {
-    if (!activeConnectEntity() || ![s_connectVolume respondsToSelector:@selector(connectVolume)]) return NO;
+    if (!activeConnectEntity()) return NO;
+    if (s_cachedConnectVolume >= 0) {
+        *out = s_cachedConnectVolume;
+        return YES;
+    }
+    if (![s_connectVolume respondsToSelector:@selector(connectVolume)]) return NO;
     double value = [s_connectVolume connectVolume];
     if (!isfinite(value)) return NO;
-    *out = MIN(1, MAX(0, (CGFloat)value));
+    CGFloat clamped = MIN(1, MAX(0, (CGFloat)value));
+    s_cachedConnectVolume = clamped;
+    *out = clamped;
     return YES;
 }
 
@@ -179,6 +187,7 @@ static UIImageView *glyph(NSString *symbol) {
 }
 
 - (void)dealloc {
+    [s_rows removeObject:self];
     [self restoreAncestorGestures];
     [NSNotificationCenter.defaultCenter removeObserver:self];
     [AVAudioSession.sharedInstance removeObserver:self forKeyPath:@"outputVolume" context:&kSessionContext];
@@ -228,8 +237,9 @@ static UIImageView *glyph(NSString *symbol) {
 
 - (void)connectVolumeChanged:(CGFloat)value {
     if (!activeConnectEntity() || !isfinite(value)) return;
-    if (_held || CACurrentMediaTime() - _lastPush < 0.6) return;
     value = MIN(1, MAX(0, value));
+    s_cachedConnectVolume = value;
+    if (_held || CACurrentMediaTime() - _lastPush < 0.6) return;
     if (fabs(value - _value) > 0.002) [self setValue:value fromUser:NO];
 }
 
@@ -250,6 +260,7 @@ static UIImageView *glyph(NSString *symbol) {
 - (void)pushVolume {
     if (activeConnectEntity() && [s_connectVolume respondsToSelector:@selector(setVolume:reason:)]) {
         _lastPush = CACurrentMediaTime();
+        s_cachedConnectVolume = _value;
         [s_connectVolume setVolume:_value reason:@"DevicePickerUIImpl"];
         return;
     }
@@ -431,6 +442,9 @@ static void onMain(dispatch_block_t block) {
 }
 
 - (void)remoteMediaSessionVolumeDidChangeToValue:(double)value {
+    onMain(^{
+        for (SGRVolumeRow *row in s_rows) [row connectVolumeChanged:value];
+    });
 }
 
 - (void)groupedDeviceVolumeDidChangeToValue:(double)value groupDeviceIdentifier:(NSString *)identifier {
@@ -447,8 +461,10 @@ static SGRConnectVolumeObserver *connectObserver(void) {
 
 static void syncConnectDevice(void) {
     NSString *key = activeConnectKey();
-    BOOL switched = (key != s_connectKey) && ![key isEqualToString:s_connectKey];
+    BOOL same = (key == s_connectKey) || [key isEqualToString:s_connectKey];
+    BOOL switched = !same;
     s_connectKey = [key copy];
+    if (switched) s_cachedConnectVolume = -1;
     for (SGRVolumeRow *row in s_rows) {
         if (switched) [row connectEntityChanged];
         else [row refreshFromSystem];
