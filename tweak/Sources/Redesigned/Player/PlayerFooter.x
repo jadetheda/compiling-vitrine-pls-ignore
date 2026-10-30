@@ -55,7 +55,7 @@ static const CGFloat kVolumeLift = 10;
 // "airplayaudio" is the name iOS 16 knows; iOS 18 calls it airplay.audio and keeps this one as its alias.
 static NSString *const kConnectSymbol = @"airplayaudio", *const kQueueSymbol = @"list.bullet";
 
-static char kConnectKey, kShareKey, kTrimmerKey, kSharedByKey, kQueueKey, kQueueIconKey, kLyricsGlyphKey, kQueueGlyphKey, kReachKey, kRowKey;
+static char kConnectKey, kShareKey, kTrimmerKey, kSharedByKey, kQueueKey, kLyricsGlyphKey, kQueueGlyphKey, kReachKey, kRowKey;
 static __weak SGRGlyphButton *sg_lyricsGlyph;
 static __weak SGRGlyphButton *sg_queueGlyph;
 
@@ -148,7 +148,7 @@ SGRGlyphButton *SGRPlayerQueueGlyphIn(UIView *host) {
 
 #pragma mark - the Music app's glyphs
 
-static char kStandInKey, kClearKey, kQueueActiveColorKey;
+static char kStandInKey, kClearKey;
 
 // The Kit's glyph centered inside `drawn`: it takes `drawn`'s hidden, alpha and animations with it.
 static SGRGlyphView *standIn(UIView *drawn, NSString *symbol) {
@@ -224,46 +224,6 @@ static void standInForConnect(UIImageView *drawn) {
     takeConnectImage(drawn);
     if (!made) SGRObserveImage(drawn, ^(UIImageView *view) { takeConnectImage(view); });
 }
-
-// The queue's state as Spotify sets it, for the stand-in; Spotify's own glyph is drawn in clear.
-static void tintQueueStandIn(SPTEncoreIconView *icon) {
-    SGRGlyphView *glyph = objc_getAssociatedObject(icon, &kStandInKey);
-    // Lit by Spotify's own state, not by a color a cover could make look gray. Lit, it is drawn in the color, as Connect
-    // is, so Follow the cover finds it by its pixels and repaints it.
-    UIColor *active = objc_getAssociatedObject(icon, &kQueueActiveColorKey);
-    UIImage *symbol = [UIImage systemImageNamed:glyph.symbol withConfiguration:glyph.preferredSymbolConfiguration];
-    BOOL lit = icon.isActive && active;
-    glyph.image = lit ? litImage(glyph, symbol, active) : symbol;
-    if (lit) SGRPlayerPaintCover(glyph);
-}
-
-static void standInForQueue(SPTEncoreIconView *icon) {
-    if (![icon isKindOfClass:%c(SPTEncoreIconView)]) return;
-    BOOL made = objc_getAssociatedObject(icon, &kStandInKey) != nil;
-    if (!standIn(icon, kQueueSymbol) || made) return;
-    UIColor *color = icon.foregroundColor, *active = icon.activeForegroundColor;
-    // Through the setters below, which now keep each color and hand Spotify's drawing clear.
-    if (color) icon.foregroundColor = color;
-    if (active) icon.activeForegroundColor = active;
-    tintQueueStandIn(icon);
-}
-
-%hook SPTEncoreIconView
-// The stand-in does not take the color at rest, only the active one.
-- (void)setForegroundColor:(UIColor *)color {
-    %orig(objc_getAssociatedObject(self, &kStandInKey) ? UIColor.clearColor : color);
-}
-- (void)setActiveForegroundColor:(UIColor *)color {
-    BOOL ours = objc_getAssociatedObject(self, &kStandInKey) != nil;
-    if (ours) objc_setAssociatedObject(self, &kQueueActiveColorKey, color, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    %orig(ours ? UIColor.clearColor : color);
-    if (ours) tintQueueStandIn(self);
-}
-- (void)setIsActive:(BOOL)active {
-    %orig;
-    if (objc_getAssociatedObject(self, &kStandInKey)) tintQueueStandIn(self);
-}
-%end
 
 #pragma mark - the row
 
@@ -527,5 +487,5 @@ static char kGlyphSeenKey;
     if (!SGRedesignedUI()) return;
     %init;
     if (SGRPlayerVolumeOn()) %init(VolumeSlider);
-    SGRequireClasses(@[@"_TtC20NowPlaying_ModesImpl18FooterElementsUnit", @"SPTEncoreIconView"]);
+    SGRequireClasses(@[@"_TtC20NowPlaying_ModesImpl18FooterElementsUnit"]);
 }
