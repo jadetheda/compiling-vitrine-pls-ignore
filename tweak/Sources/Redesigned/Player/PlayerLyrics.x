@@ -72,6 +72,7 @@ static __weak UIView *sg_host;              // SPTNowPlayingView
 static __weak UIViewController *sg_info, *sg_duration, *sg_floating, *sg_header;
 static __weak UIView *sg_titleElement;      // the arranged element view holding the title and the artist
 static __weak UIViewController *sg_player;  // NowPlayingViewController, whose units the controls are
+static CGRect sg_lastValidCoverFrame;       // cached full-size cover frame in sg_host for Queue open/close morph
 static BOOL sg_alone;                       // the lines have the player to themselves
 static BOOL sg_touching;                    // a finger is on the player, which holds the clock (SGRPlayerTouchWatcher)
 static NSTimer *sg_rest;
@@ -152,6 +153,17 @@ static BOOL keepsTitle(void) {
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     if (hit != self) return hit;
+    if (sg_inlineMode == SGRPlayerInlineModeQueue) {
+        UIView *dur = sg_duration.viewIfLoaded;
+        if (dur && !dur.hidden && dur.alpha > 0.01) {
+            CGPoint pt = [dur convertPoint:point fromView:self];
+            if (CGRectContainsPoint(CGRectInset(dur.bounds, 0.0, -10.0), pt)) {
+                UIView *inDur = [dur hitTest:pt withEvent:event];
+                if (inDur) return inDur;
+            }
+        }
+        return nil;
+    }
     UIView *row = isStageOpen() && (!sg_alone || keepsTitle()) ? sg_info.viewIfLoaded : nil;
     UIView *inRow = row ? [row hitTest:[row convertPoint:point fromView:self] withEvent:event] : nil;
     return inRow == row ? nil : inRow;
@@ -181,18 +193,23 @@ static BOOL keepsTitle(void) {
     if (!_queue) {
         _queue = [[SGRQueueView alloc] initWithFrame:self.bounds];
     }
-    if (_queue.superview != self) [self addSubview:_queue];
+    if (_queue.superview != self) [self insertSubview:_queue belowSubview:_thumb];
     return _queue;
 }
 
 @end
 
-static SGRPlayerLyricsOverlay *overlayIn(UIView *host) {
+static SGRPlayerLyricsOverlay *ensureOverlayObject(UIView *host) {
     SGRPlayerLyricsOverlay *overlay = objc_getAssociatedObject(host, &kOverlayKey);
     if (!overlay) {
         overlay = [[SGRPlayerLyricsOverlay alloc] initWithFrame:host.bounds];
         objc_setAssociatedObject(host, &kOverlayKey, overlay, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
+    return overlay;
+}
+
+static SGRPlayerLyricsOverlay *overlayIn(UIView *host) {
+    SGRPlayerLyricsOverlay *overlay = ensureOverlayObject(host);
     // On top of the player: it reaches from under the header row down to the progress bar, so it is over
     // the covers and the gradients and clear of every control. Under them instead, the mixing background
     // Spotify keeps between the two (01.txt:72) would be free to draw over the lines.
@@ -200,6 +217,72 @@ static SGRPlayerLyricsOverlay *overlayIn(UIView *host) {
     if (overlay.superview != host) [host addSubview:overlay];
     else if (host.subviews.lastObject != overlay) [host bringSubviewToFront:overlay];
     return overlay;
+}
+
+static UIImage *liveCoverImageIn(UIView *host) {
+    UIImage *art = SGRNowPlayingArtwork(NULL, NULL);
+    if (art) return art;
+    UIView *root = SGRPlayerCoverList() ?: host;
+    if (!root) return nil;
+    __block UIImage *found = nil;
+    SGForEachView(root, ^(UIView *v) {
+        if (!found && [v isKindOfClass:UIImageView.class] && !v.hidden && v.bounds.size.width >= 150.0) {
+            UIImage *img = ((UIImageView *)v).image;
+            if (img) found = img;
+        }
+    });
+    return found;
+}
+
+static CGRect validCoverFrameIn(UIView *host) {
+    CGRect cover = SGRPlayerCoverFrameIn(host);
+    if (!CGRectIsNull(cover) && cover.size.width >= 150.0) {
+        sg_lastValidCoverFrame = cover;
+        return cover;
+    }
+    if (sg_lastValidCoverFrame.size.width >= 150.0) {
+        return sg_lastValidCoverFrame;
+    }
+    CGFloat side = MIN(310.0, MAX(220.0, host.bounds.size.width - 80.0));
+    CGFloat safeTop = host.safeAreaInsets.top > 20.0 ? host.safeAreaInsets.top : 47.0;
+    return CGRectMake((host.bounds.size.width - side) * 0.5, safeTop + 88.0, side, side);
+}
+
+static CGFloat queueDurationTopIn(UIView *host) {
+    CGFloat safeBottom = host.window ? host.window.safeAreaInsets.bottom : host.safeAreaInsets.bottom;
+    return host.bounds.size.height - (266.0 + safeBottom);
+}
+
+static void placeQueueBottomChrome(UIView *host, BOOL queueOpen) {
+    UIView *dur = sg_duration.viewIfLoaded;
+    if (dur && host) {
+        if (queueOpen) {
+            CGRect rawBar = SGFrameIn(dur, host);
+            rawBar = CGRectOffset(rawBar, -dur.transform.tx, -dur.transform.ty);
+            CGFloat dy = round(queueDurationTopIn(host) - CGRectGetMinY(rawBar));
+            CGAffineTransform up = CGAffineTransformMakeTranslation(0.0, dy);
+            if (!CGAffineTransformEqualToTransform(dur.transform, up)) dur.transform = up;
+        } else {
+            if (!CGAffineTransformIsIdentity(dur.transform)) dur.transform = CGAffineTransformIdentity;
+        }
+    }
+    SGRPlayerLayoutFooterForQueue();
+}
+
+static void setHeaderShownForQueue(BOOL shown, BOOL finalizeHidden) {
+    UIView *header = sg_header.viewIfLoaded;
+    if (!header) return;
+    if (shown) header.hidden = NO;
+    header.alpha = shown ? 1.0 : 0.0;
+    header.userInteractionEnabled = shown;
+    SGForEachView(header, ^(UIView *v) {
+        if ([v isKindOfClass:UIVisualEffectView.class]) {
+            SGRShowGlass(v, shown);
+        }
+    });
+    if (!shown && finalizeHidden) {
+        header.hidden = YES;
+    }
 }
 
 #pragma mark - the measurements
@@ -229,16 +312,14 @@ static SGRLyricsLayout layoutIn(UIView *host, SGRPlayerInlineMode mode) {
     if (mode == SGRPlayerInlineModeQueue) {
         CGFloat safeTop = host.safeAreaInsets.top;
         if (safeTop < 20.0) safeTop = 47.0;
-        // Grabber sits at y = safeTop + 6 (53 pt on a 47 pt safe-area screen), queue viewport at y = 72..538 pt.
-        CGFloat top = safeTop + 6.0;
-        CGFloat bottom = CGRectGetMinY(bar) - 6.0;
-        CGRect cover = SGRPlayerCoverFrameIn(host);
-        if (CGRectIsNull(cover)) cover = CGRectMake(20.0, top + 34.0, 62.0, 62.0);
-        l.cover = cover;
-        l.thumb = CGRectMake(20.0, top + 34.0, 62.0, 62.0);
-        l.stage = CGRectMake(0, top, host.bounds.size.width, MAX(0, bottom - top));
-        l.lift = -100;
-        l.shift = 0;
+        // Grabber sits at y = safeTop + 8 (55 pt on 47 pt safe-area screen), queue viewport at y = 72..538 pt (height 466 pt).
+        CGFloat top = safeTop + 8.0;
+        CGFloat bottom = queueDurationTopIn(host) - 6.0;
+        l.cover = validCoverFrameIn(host);
+        l.thumb = CGRectMake(28.0, top + 17.0 + 14.7, 62.0, 62.0);
+        l.stage = CGRectMake(0.0, top, host.bounds.size.width, MAX(0.0, bottom - top));
+        l.lift = -100.0;
+        l.shift = 0.0;
         l.ok = (l.stage.size.height > kLivingHeight / 2);
         return l;
     }
@@ -354,7 +435,7 @@ BOOL SGRPlayerQueueOpen(void) {
 // runs while it is up leaves it exactly where the eye has it: the two are worked out from one
 // measurement. Bounds and a center, not a frame, since both views can be under a transform.
 static void place(SGRPlayerLyricsOverlay *overlay, UIView *host, SGRLyricsLayout l) {
-    overlay.frame = CGRectUnion(l.cover, CGRectUnion(l.thumb, l.stage));
+    overlay.frame = host.bounds;
     CGRect cover = [overlay convertRect:l.cover fromView:host], stage = [overlay convertRect:l.stage fromView:host];
     overlay.thumb.bounds = (CGRect){CGPointZero, cover.size};
     overlay.thumb.center = CGPointMake(CGRectGetMidX(cover), CGRectGetMidY(cover));
@@ -368,7 +449,8 @@ static void place(SGRPlayerLyricsOverlay *overlay, UIView *host, SGRLyricsLayout
         overlay.existingQueue.bounds = (CGRect){CGPointZero, stage.size};
         overlay.existingQueue.center = CGPointMake(CGRectGetMidX(stage), CGRectGetMidY(stage));
     }
-    if (sg_inlineMode == SGRPlayerInlineModeQueue) {
+    [overlay bringSubviewToFront:overlay.thumb];
+    if (sg_inlineMode == SGRPlayerInlineModeQueue && !sg_moving) {
         overlay.thumb.alpha = 0;
         overlay.thumb.hidden = YES;
     } else {
@@ -387,10 +469,10 @@ static CGAffineTransform thumbTransform(SGRLyricsLayout l) {
 
 // The corners as they will be drawn: a radius under a scale is drawn scaled, so the thumbnail asks for
 // the radius it wants divided by the shrink, and the two ends of the animation are 12pt and 8pt corners.
-static CGFloat thumbRadius(SGRLyricsLayout l, BOOL open) {
+static CGFloat thumbRadiusForMode(SGRLyricsLayout l, BOOL open, SGRPlayerInlineMode mode) {
     if (!open) return SGRRadiusArtwork;
     CGFloat scale = l.cover.size.width > 0 ? l.thumb.size.width / l.cover.size.width : 1;
-    CGFloat targetRadius = (sg_inlineMode == SGRPlayerInlineModeQueue) ? 8.0 : SGRRadiusCover;
+    CGFloat targetRadius = (mode == SGRPlayerInlineModeQueue) ? 8.0 : SGRRadiusCover;
     return scale > 0 ? targetRadius / scale : SGRRadiusArtwork;
 }
 
@@ -664,37 +746,40 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
         SGLog(@"redesign player: the stage was asked for before the player laid out");
         return;
     }
+    validCoverFrameIn(host);
     SGRPlayerInlineMode measureMode = (targetMode != SGRPlayerInlineModeNone) ? targetMode : sg_inlineMode;
     SGRLyricsLayout l = layoutIn(host, measureMode);
     if (targetMode != SGRPlayerInlineModeNone && !l.ok) {
         SGLog(@"redesign player: the stage has nowhere to go (stage %.0fx%.0f, lift %.0f)", l.stage.size.width, l.stage.size.height, l.lift);
         return;
     }
-    UIImage *picture = SGRNowPlayingArtwork(NULL, NULL);
+    UIImage *picture = liveCoverImageIn(host);
     if (targetMode == SGRPlayerInlineModeLyrics && !picture) {
         SGLog(@"redesign player: no artwork read yet, stage stays down");
         return;
     }
 
     SGRPlayerLyricsOverlay *overlay = overlayIn(host);
+    if (picture) overlay.cover.image = picture;
 
     // Cross-switch between Lyrics and Queue while stage is already active
     if (isStageOpen() && targetMode != SGRPlayerInlineModeNone) {
         if (sg_alone) setAlone(NO, animated);
+        SGRPlayerInlineMode prevMode = sg_inlineMode;
+        SGRLyricsLayout oldL = layoutIn(host, prevMode);
         sg_inlineMode = targetMode;
         SGRPlayerLyricsChanged();
         SGRPlayerQueueChanged();
 
         SGRLyricsLayout newL = layoutIn(host, targetMode);
+        sg_moving = YES;
         place(overlay, host, newL);
-        void (^layoutSwap)(void) = ^{
-            overlay.thumb.transform = thumbTransform(newL);
-            overlay.cover.layer.cornerRadius = thumbRadius(newL, YES);
-            overlay.thumb.alpha = (targetMode == SGRPlayerInlineModeQueue) ? 0 : 1;
-            if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = (targetMode == SGRPlayerInlineModeQueue) ? 0 : 1;
-            placeTitleRow(newL);
-            sg_header.viewIfLoaded.alpha = (targetMode == SGRPlayerInlineModeQueue) ? 0 : 1;
-        };
+        overlay.thumb.hidden = NO;
+        overlay.thumb.alpha = 1.0;
+        if (oldL.ok) {
+            overlay.thumb.transform = thumbTransform(oldL);
+            overlay.cover.layer.cornerRadius = thumbRadiusForMode(oldL, YES, prevMode);
+        }
 
         if (targetMode == SGRPlayerInlineModeQueue) {
             SGRQueueView *q = overlay.queue;
@@ -702,23 +787,37 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
             q.bounds = (CGRect){CGPointZero, qStage.size};
             q.center = CGPointMake(CGRectGetMidX(qStage), CGRectGetMidY(qStage));
             q.hidden = NO;
-            q.alpha = 0;
+            q.alpha = 1.0;
             q.transform = CGAffineTransformIdentity;
-            [q reloadTracks];
+            [q prepareForOpenTransition];
+            [q setTransitionArtworkHidden:YES];
+            [q setContentSlideOffset:(SGRReduceMotion() ? 0.0 : 48.0) opacity:0.0];
+
             void (^swap)(void) = ^{
-                q.alpha = 1;
-                overlay.stage.alpha = 0;
-                if (overlay.existingLyrics) overlay.existingLyrics.alpha = 0;
-                layoutSwap();
+                [q setContentSlideOffset:0.0 opacity:1.0];
+                overlay.stage.alpha = 0.0;
+                if (overlay.existingLyrics) overlay.existingLyrics.alpha = 0.0;
+                overlay.thumb.transform = thumbTransform(newL);
+                overlay.cover.layer.cornerRadius = thumbRadiusForMode(newL, YES, SGRPlayerInlineModeQueue);
+                if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 0.0;
+                placeTitleRow(newL);
+                setHeaderShownForQueue(NO, NO);
+                placeQueueBottomChrome(host, YES);
             };
-            void (^done)(BOOL) = ^(BOOL finished) {
+            void (^done)(BOOL) = ^(__unused BOOL finished) {
+                sg_moving = NO;
                 if (sg_inlineMode == SGRPlayerInlineModeQueue) {
+                    [q setTransitionArtworkHidden:NO];
+                    [q setContentSlideOffset:0.0 opacity:1.0];
+                    overlay.thumb.alpha = 0.0;
+                    overlay.thumb.hidden = YES;
                     overlay.stage.hidden = YES;
                     if (overlay.existingLyrics) overlay.existingLyrics.hidden = YES;
+                    setHeaderShownForQueue(NO, YES);
                 }
             };
             if (animated && !SGRReduceMotion()) {
-                [UIView animateWithDuration:kLyricsIn delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:swap completion:done];
+                [UIView animateWithDuration:0.40 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:swap completion:done];
             } else {
                 swap();
                 done(YES);
@@ -726,23 +825,34 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
             [sg_rest invalidate];
             sg_rest = nil;
         } else {
+            SGRQueueView *q = overlay.existingQueue;
+            if (q) [q setTransitionArtworkHidden:YES];
             overlay.stage.hidden = NO;
             overlay.stage.transform = CGAffineTransformIdentity;
             overlay.lyrics.hidden = NO;
             overlay.lyrics.frame = overlay.stage.bounds;
+            setHeaderShownForQueue(YES, NO);
             void (^swap)(void) = ^{
-                overlay.stage.alpha = 1;
-                overlay.lyrics.alpha = 1;
-                if (overlay.existingQueue) overlay.existingQueue.alpha = 0;
-                layoutSwap();
+                overlay.stage.alpha = 1.0;
+                overlay.lyrics.alpha = 1.0;
+                if (q) [q setContentSlideOffset:(SGRReduceMotion() ? 0.0 : 48.0) opacity:0.0];
+                overlay.thumb.transform = thumbTransform(newL);
+                overlay.cover.layer.cornerRadius = thumbRadiusForMode(newL, YES, SGRPlayerInlineModeLyrics);
+                if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 1.0;
+                placeTitleRow(newL);
+                placeQueueBottomChrome(host, NO);
             };
-            void (^done)(BOOL) = ^(BOOL finished) {
-                if (sg_inlineMode == SGRPlayerInlineModeLyrics && overlay.existingQueue) {
-                    overlay.existingQueue.hidden = YES;
+            void (^done)(BOOL) = ^(__unused BOOL finished) {
+                sg_moving = NO;
+                if (sg_inlineMode == SGRPlayerInlineModeLyrics && q) {
+                    [q setTransitionArtworkHidden:NO];
+                    [q setContentSlideOffset:0.0 opacity:1.0];
+                    q.hidden = YES;
+                    q.alpha = 0.0;
                 }
             };
             if (animated && !SGRReduceMotion()) {
-                [UIView animateWithDuration:kLyricsIn delay:0 options:UIViewAnimationOptionCurveEaseInOut animations:swap completion:done];
+                [UIView animateWithDuration:0.40 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:swap completion:done];
             } else {
                 swap();
                 done(YES);
@@ -754,96 +864,154 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
 
     BOOL open = (targetMode != SGRPlayerInlineModeNone);
     SGRPlayerInlineMode closingMode = sg_inlineMode;
+    BOOL isQueueTransition = (targetMode == SGRPlayerInlineModeQueue) || (!open && closingMode == SGRPlayerInlineModeQueue);
+
     if (!open) setAlone(NO, NO);
     sg_inlineMode = targetMode;
     SGRPlayerLyricsChanged();
     SGRPlayerQueueChanged();
+
+    // Dedicated Apple Music 0.40s (damping 0.85) matched-geometry spring for Queue Open & Close
+    if (isQueueTransition) {
+        sg_moving = animated;
+        place(overlay, host, l);
+        CGAffineTransform away = thumbTransform(l);
+        BOOL fades = SGRPlayerMotionShowing();
+        SGRQueueView *q = overlay.queue;
+        CGRect qStage = [overlay convertRect:l.stage fromView:host];
+        q.bounds = (CGRect){CGPointZero, qStage.size};
+        q.center = CGPointMake(CGRectGetMidX(qStage), CGRectGetMidY(qStage));
+        q.transform = CGAffineTransformIdentity;
+
+        overlay.stage.hidden = YES;
+        overlay.stage.alpha = 0.0;
+        if (overlay.existingLyrics) {
+            overlay.existingLyrics.hidden = YES;
+            overlay.existingLyrics.alpha = 0.0;
+        }
+
+        if (open) {
+            [q prepareForOpenTransition];
+            q.hidden = NO;
+            q.alpha = 1.0;
+            [q setTransitionArtworkHidden:YES];
+            [q setContentSlideOffset:(SGRReduceMotion() ? 0.0 : 60.0) opacity:0.0];
+
+            overlay.thumb.hidden = NO;
+            overlay.thumb.alpha = fades ? 0.0 : 1.0;
+            overlay.thumb.transform = fades ? away : CGAffineTransformIdentity;
+            overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, fades, SGRPlayerInlineModeQueue);
+            SGRPlayerCoverList().alpha = 0.0;
+        } else {
+            [q setTransitionArtworkHidden:YES];
+            [q setContentSlideOffset:0.0 opacity:1.0];
+            overlay.thumb.hidden = NO;
+            overlay.thumb.alpha = 1.0;
+            overlay.thumb.transform = away;
+            overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, YES, SGRPlayerInlineModeQueue);
+            if (sg_header.viewIfLoaded) sg_header.viewIfLoaded.hidden = NO;
+        }
+
+        void (^springStep)(void) = ^{
+            overlay.thumb.transform = (open || fades) ? away : CGAffineTransformIdentity;
+            overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, open || fades, SGRPlayerInlineModeQueue);
+            overlay.thumb.alpha = (!open && fades) ? 0.0 : 1.0;
+            [q setContentSlideOffset:(open ? 0.0 : (SGRReduceMotion() ? 0.0 : 60.0)) opacity:(open ? 1.0 : 0.0)];
+            sg_floating.viewIfLoaded.alpha = open ? 0.0 : 1.0;
+            if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = open ? 0.0 : 1.0;
+            placeTitleRow(l);
+            setHeaderShownForQueue(!open, NO);
+            placeQueueBottomChrome(host, open);
+        };
+        void (^queueSettled)(BOOL) = ^(__unused BOOL finished) {
+            sg_moving = NO;
+            if (sg_inlineMode == SGRPlayerInlineModeQueue) {
+                [q setTransitionArtworkHidden:NO];
+                [q setContentSlideOffset:0.0 opacity:1.0];
+                overlay.thumb.alpha = 0.0;
+                overlay.thumb.hidden = YES;
+                if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 0.0;
+                setHeaderShownForQueue(NO, YES);
+                return;
+            }
+            [q setTransitionArtworkHidden:NO];
+            [q setContentSlideOffset:0.0 opacity:1.0];
+            q.hidden = YES;
+            q.alpha = 0.0;
+            SGRPlayerCoverList().alpha = 1.0;
+            if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 1.0;
+            setHeaderShownForQueue(YES, NO);
+            placeQueueBottomChrome(host, NO);
+            [overlay removeFromSuperview];
+        };
+
+        if (animated && !SGRReduceMotion()) {
+            [UIView animateWithDuration:0.40 delay:0.0 usingSpringWithDamping:0.85 initialSpringVelocity:0.0 options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction animations:springStep completion:queueSettled];
+        } else if (animated) {
+            [UIView animateWithDuration:0.25 delay:0.0 options:UIViewAnimationOptionCurveEaseInOut | UIViewAnimationOptionBeginFromCurrentState animations:springStep completion:queueSettled];
+        } else {
+            springStep();
+            queueSettled(YES);
+        }
+
+        [sg_rest invalidate];
+        sg_rest = nil;
+        SGLog(@"redesign player: queue mode %ld, thumbnail %.0fx%.0f at %.1f,%.1f, stage %.0fx%.0f",
+              (long)targetMode, l.thumb.size.width, l.thumb.size.height, l.thumb.origin.x, l.thumb.origin.y,
+              l.stage.size.width, l.stage.size.height);
+        return;
+    }
 
     place(overlay, host, l);
     CGAffineTransform away = thumbTransform(l);
     BOOL fades = SGRPlayerMotionShowing();
 
     overlay.thumb.transform = open && !fades ? CGAffineTransformIdentity : away;
-    overlay.thumb.alpha = (open && targetMode == SGRPlayerInlineModeQueue) ? 0 : (open && fades ? 0 : 1);
-    overlay.cover.layer.cornerRadius = thumbRadius(l, fades || !open);
+    overlay.thumb.alpha = open && fades ? 0 : 1;
+    overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, fades || !open, SGRPlayerInlineModeLyrics);
 
     CGAffineTransform entering = SGRReduceMotion() ? CGAffineTransformIdentity : CGAffineTransformMakeScale(kLyricsEnterScale, kLyricsEnterScale);
 
     if (open) {
         overlay.cover.image = picture;
-        if (targetMode == SGRPlayerInlineModeLyrics) {
-            overlay.stage.hidden = NO;
-            overlay.stage.alpha = 0;
-            overlay.stage.transform = entering;
-            overlay.lyrics.hidden = NO;
-            overlay.lyrics.alpha = 1;
-            if (overlay.existingQueue) {
-                overlay.existingQueue.hidden = YES;
-                overlay.existingQueue.alpha = 0;
-            }
-            overlay.lyrics.browsingBegan = ^(BOOL onward) {
-                if (!onward) setAlone(NO, YES);
-                else if (!UIAccessibilityIsVoiceOverRunning() && !coveredBySheet()) setAlone(YES, YES);
-            };
-        } else {
-            overlay.stage.hidden = YES;
-            overlay.stage.alpha = 0;
-            if (overlay.existingLyrics) {
-                overlay.existingLyrics.hidden = YES;
-                overlay.existingLyrics.alpha = 0;
-            }
-            overlay.thumb.alpha = 0;
-            overlay.thumb.hidden = YES;
-            if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 0;
-            SGRQueueView *q = overlay.queue;
-            CGRect qStage = [overlay convertRect:l.stage fromView:host];
-            q.bounds = (CGRect){CGPointZero, qStage.size};
-            q.center = CGPointMake(CGRectGetMidX(qStage), CGRectGetMidY(qStage));
-            q.hidden = NO;
-            q.alpha = 0;
-            q.transform = entering;
-            [q reloadTracks];
+        overlay.stage.hidden = NO;
+        overlay.stage.alpha = 0;
+        overlay.stage.transform = entering;
+        overlay.lyrics.hidden = NO;
+        overlay.lyrics.alpha = 1;
+        if (overlay.existingQueue) {
+            overlay.existingQueue.hidden = YES;
+            overlay.existingQueue.alpha = 0;
         }
-
+        overlay.lyrics.browsingBegan = ^(BOOL onward) {
+            if (!onward) setAlone(NO, YES);
+            else if (!UIAccessibilityIsVoiceOverRunning() && !coveredBySheet()) setAlone(YES, YES);
+        };
         SGRPlayerCoverList().alpha = 0;
     }
 
     void (^move)(void) = ^{
         overlay.thumb.transform = open || fades ? away : CGAffineTransformIdentity;
-        overlay.cover.layer.cornerRadius = thumbRadius(l, open || fades);
+        overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, open || fades, SGRPlayerInlineModeLyrics);
         placeTitleRow(l);
     };
     void (^fade)(void) = ^{
-        overlay.thumb.alpha = (open && targetMode == SGRPlayerInlineModeQueue) ? 0 : (!open && fades ? 0 : 1);
+        overlay.thumb.alpha = !open && fades ? 0 : 1;
         sg_floating.viewIfLoaded.alpha = open ? 0 : 1;
-        sg_header.viewIfLoaded.alpha = (open && targetMode == SGRPlayerInlineModeQueue) ? 0 : 1;
-        if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = (open && targetMode == SGRPlayerInlineModeQueue) ? 0 : 1;
+        setHeaderShownForQueue(YES, NO);
+        if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 1;
     };
     void (^show)(void) = ^{
-        if (targetMode == SGRPlayerInlineModeQueue || (!open && closingMode == SGRPlayerInlineModeQueue)) {
-            if (overlay.existingQueue) {
-                overlay.existingQueue.alpha = open ? 1 : 0;
-                overlay.existingQueue.transform = open ? CGAffineTransformIdentity : entering;
-            }
-        } else {
-            overlay.stage.alpha = open ? 1 : 0;
-            overlay.stage.transform = open ? CGAffineTransformIdentity : entering;
-        }
+        overlay.stage.alpha = open ? 1 : 0;
+        overlay.stage.transform = open ? CGAffineTransformIdentity : entering;
     };
     void (^settled)(BOOL) = ^(BOOL finished) {
         sg_moving = NO;
-        if (isStageOpen()) {
-            if (sg_inlineMode == SGRPlayerInlineModeQueue) {
-                overlay.thumb.alpha = 0;
-                overlay.thumb.hidden = YES;
-                if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 0;
-                sg_header.viewIfLoaded.alpha = 0;
-            }
-            return;
-        }
+        if (isStageOpen()) return;
         SGRPlayerCoverList().alpha = 1;
         if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 1;
-        sg_header.viewIfLoaded.alpha = 1;
+        setHeaderShownForQueue(YES, NO);
+        placeQueueBottomChrome(host, NO);
         [overlay removeFromSuperview];
     };
 
@@ -898,14 +1066,18 @@ static void replace(void) {
     if (!host || sg_moving) return;   // a pass in the middle of the transition would cut it short
 
     BOOL stageOpen = isStageOpen();
+    if (!stageOpen) {
+        validCoverFrameIn(host);
+    }
     SGRLyricsLayout l = stageOpen ? layoutIn(host, sg_inlineMode) : (SGRLyricsLayout){0};
     if (stageOpen && !l.ok) return;
     placeTitleRow(l);
+    placeQueueBottomChrome(host, sg_inlineMode == SGRPlayerInlineModeQueue);
     sg_floating.viewIfLoaded.alpha = stageOpen ? 0 : 1;
     if (sg_inlineMode == SGRPlayerInlineModeQueue) {
-        sg_header.viewIfLoaded.alpha = 0;
+        setHeaderShownForQueue(NO, YES);
     } else if (!stageOpen) {
-        sg_header.viewIfLoaded.alpha = 1;
+        setHeaderShownForQueue(YES, NO);
     }
     if (!stageOpen) return;
 
@@ -921,7 +1093,7 @@ static void replace(void) {
     }
     place(overlay, host, l);
     overlay.thumb.transform = thumbTransform(l);
-    overlay.cover.layer.cornerRadius = thumbRadius(l, YES);
+    overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, YES, sg_inlineMode);
     if (sg_inlineMode == SGRPlayerInlineModeLyrics) overlay.lyrics.frame = overlay.stage.bounds;
     else if (sg_inlineMode == SGRPlayerInlineModeQueue && overlay.existingQueue) {
         [overlay.existingQueue setNeedsLayout];
@@ -943,6 +1115,16 @@ static void replace(void) {
         SGRPlayerWake *wake = [SGRPlayerWake new];
         [host addGestureRecognizer:wake];
         sg_wake = wake;
+        // Pre-warm SGRQueueView on the next run-loop turn (without adding overlay to host) so the very first tap mounts in 0ms
+        __weak UIView *weakHost = host;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIView *strongHost = weakHost;
+            if (!strongHost) return;
+            SGRPlayerLyricsOverlay *warm = ensureOverlayObject(strongHost);
+            SGRQueueView *q = warm.queue;
+            q.hidden = YES;
+            q.alpha = 0.0;
+        });
         SGLog(@"redesign player: the lyrics have the player's view %.0fx%.0f", host.bounds.size.width, host.bounds.size.height);
     }
     replace();
@@ -1145,6 +1327,7 @@ BOOL SGRPlayerLyricsNone(void) {
 
 %ctor {
     if (!SGRedesignedUI()) return;
+    [SGRQueueView startSessionIfNeeded];
     %init;
     Class djInformation = SGRDJClass(@"DJMInformationUnitViewController");
     if (djInformation) { %init(SGRDJInformationHooks, SGRDJInformationUnit = djInformation); }

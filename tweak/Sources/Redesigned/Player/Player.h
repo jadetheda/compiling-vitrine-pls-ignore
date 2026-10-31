@@ -109,6 +109,9 @@ void SGRPlayerQueueChanged(void);
 // Hides or restores shuffle and repeat on the main transport controls row when the inline queue opens or closes.
 void SGRPlayerControlsQueueChanged(void);
 
+// Re-applies the footer, controls, and volume vertical layout when the inline queue opens or closes.
+void SGRPlayerLayoutFooterForQueue(void);
+
 // The queue glyph of the footer, made on first ask in `host`.
 SGRGlyphButton *SGRPlayerQueueGlyphIn(UIView *host);
 // An Endless_DJMusicImpl class of the AI DJ's player by its Swift name, under the mangled spelling or the

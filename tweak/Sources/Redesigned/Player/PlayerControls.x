@@ -112,6 +112,12 @@ static BOOL isHiddenButton(UIView *view) {
         || (sg_hideRepeat && [identifier isEqualToString:kRepeatID]);
 }
 
+static BOOL isQueueHiddenButton(UIView *view) {
+    if (!SGRPlayerQueueOpen()) return NO;
+    NSString *identifier = view.accessibilityIdentifier;
+    return [identifier isEqualToString:kShuffleID] || [identifier isEqualToString:kRepeatID];
+}
+
 // Spotify also swaps in a new button a moment after the controls lay out (seen for repeat on 9.1.90: the instance
 // found leaves the window 40 ms later and another arrives at alpha 1), with no layout pass after it. The new one is
 // caught as it arrives. The class is an Encore button's, taken from the first one found (`class`, not a KVO class
@@ -123,18 +129,35 @@ static BOOL isHiddenButton(UIView *view) {
 - (void)didMoveToWindow {
     %orig;
     UIView *view = (UIView *)self;
-    if (view.window && isHiddenButton(view) && sg_buttonsHost && [view isDescendantOfView:sg_buttonsHost]) SGRSuppress(view);
+    if (!view.window || !sg_buttonsHost || ![view isDescendantOfView:sg_buttonsHost]) return;
+    if (isHiddenButton(view)) SGRSuppress(view);
+    else if (isQueueHiddenButton(view)) SGRPlayerVanish(view);
+}
+- (void)setAlpha:(CGFloat)alpha {
+    UIView *view = (UIView *)self;
+    if (alpha > 0 && sg_buttonsHost && [view isDescendantOfView:sg_buttonsHost] && isQueueHiddenButton(view)) {
+        %orig(0);
+        view.userInteractionEnabled = NO;
+        view.accessibilityElementsHidden = YES;
+        return;
+    }
+    %orig;
 }
 %end
 %end
 
-static void suppressButton(UIView *button) {
+static void ensureButtonArrivalHook(UIView *button) {
     if (!button) return;
-    SGRSuppress(button);
     static BOOL hooked;
     if (hooked) return;
     hooked = YES;
     %init(SGRPlayerButtonArrival, SGRPlayerButton = button.class);
+}
+
+static void suppressButton(UIView *button) {
+    if (!button) return;
+    ensureButtonArrivalHook(button);
+    SGRSuppress(button);
 }
 
 // Each is looked for only in its own end of the row, so a row without it (a podcast's) costs a walk of one
@@ -144,20 +167,29 @@ static void hideShuffleAndRepeat(UIView *host, UIStackView *row) {
     sg_buttonsHost = host;
     UIView *shuffle = SGRFindByIdentifier(row.arrangedSubviews.firstObject, kShuffleID, &kShuffleKey);
     UIView *repeat = SGRFindByIdentifier(row.arrangedSubviews.lastObject, kRepeatID, &kRepeatKey);
+    ensureButtonArrivalHook(shuffle ?: repeat);
     BOOL queueOpen = SGRPlayerQueueOpen();
     if (sg_hideShuffle) {
         suppressButton(shuffle);
     } else if (shuffle) {
-        shuffle.alpha = queueOpen ? 0 : 1;
-        shuffle.userInteractionEnabled = !queueOpen;
-        shuffle.accessibilityElementsHidden = queueOpen;
+        if (queueOpen) {
+            SGRPlayerVanish(shuffle);
+        } else {
+            shuffle.alpha = 1;
+            shuffle.userInteractionEnabled = YES;
+            shuffle.accessibilityElementsHidden = NO;
+        }
     }
     if (sg_hideRepeat) {
         suppressButton(repeat);
     } else if (repeat) {
-        repeat.alpha = queueOpen ? 0 : 1;
-        repeat.userInteractionEnabled = !queueOpen;
-        repeat.accessibilityElementsHidden = queueOpen;
+        if (queueOpen) {
+            SGRPlayerVanish(repeat);
+        } else {
+            repeat.alpha = 1;
+            repeat.userInteractionEnabled = YES;
+            repeat.accessibilityElementsHidden = NO;
+        }
     }
 }
 
@@ -274,6 +306,7 @@ void SGRPlayerPlayGlyphIn(UIView *host) {
     // The first state can land after the controls laid out, which left the disc for want of one.
     if (!sg_playGlyph) [sg_controlsHost setNeedsLayout];
     refreshPlayGlyph(YES);
+    SGRPlayerControlsQueueChanged();
     // Spotify raises its spinner a moment after a state says loading, and drops it a moment after.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kSpinnerCheck * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ refreshPlayGlyph(YES); });
 }
