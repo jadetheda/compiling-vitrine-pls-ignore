@@ -32,4 +32,8 @@
 // Exact destination frame of the 62x62 Now Playing thumbnail in `targetView` coordinates (28.0, 86.7, 62, 62).
 - (CGRect)nowPlayingArtworkFrameInView:(UIView *)targetView;
 
+// Live on-screen frame of the 62x62 Now Playing thumbnail in `targetView` when unclipped (e.g. at scrollY <= 0),
+// falling back to `nowPlayingArtworkFrameInView:` when scrolled behind the sticky header.
+- (CGRect)visibleNowPlayingArtworkFrameInView:(UIView *)targetView;
+
 @end

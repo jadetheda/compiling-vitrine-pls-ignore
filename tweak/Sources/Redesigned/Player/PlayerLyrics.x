@@ -269,10 +269,10 @@ static void placeQueueBottomChrome(UIView *host, BOOL queueOpen) {
     SGRPlayerLayoutFooterForQueue();
 }
 
-static void setHeaderShownForQueue(BOOL shown, BOOL finalizeHidden) {
+static void setHeaderShownForQueue(BOOL shown, __unused BOOL finalizeHidden) {
     UIView *header = sg_header.viewIfLoaded;
     if (!header) return;
-    if (shown) header.hidden = NO;
+    if (header.hidden) header.hidden = NO;
     header.alpha = shown ? 1.0 : 0.0;
     header.userInteractionEnabled = shown;
     SGForEachView(header, ^(UIView *v) {
@@ -280,9 +280,6 @@ static void setHeaderShownForQueue(BOOL shown, BOOL finalizeHidden) {
             SGRShowGlass(v, shown);
         }
     });
-    if (!shown && finalizeHidden) {
-        header.hidden = YES;
-    }
 }
 
 #pragma mark - the measurements
@@ -903,13 +900,23 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
             overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, fades, SGRPlayerInlineModeQueue);
             SGRPlayerCoverList().alpha = 0.0;
         } else {
+            SGRLyricsLayout closeL = l;
+            CGRect liveThumb = [q visibleNowPlayingArtworkFrameInView:host];
+            if (liveThumb.size.width >= 40.0) closeL.thumb = liveThumb;
+            away = thumbTransform(closeL);
+            if (sg_info.viewIfLoaded && sg_info.viewIfLoaded.alpha < 0.01) {
+                sg_info.viewIfLoaded.transform = CGAffineTransformIdentity;
+                if (sg_titleElement) {
+                    sg_titleElement.transform = CGAffineTransformIdentity;
+                    clipTitle(sg_titleElement, CGFLOAT_MAX);
+                }
+            }
             [q setTransitionArtworkHidden:YES];
             [q setContentSlideOffset:0.0 opacity:1.0];
             overlay.thumb.hidden = NO;
             overlay.thumb.alpha = 1.0;
             overlay.thumb.transform = away;
-            overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, YES, SGRPlayerInlineModeQueue);
-            if (sg_header.viewIfLoaded) sg_header.viewIfLoaded.hidden = NO;
+            overlay.cover.layer.cornerRadius = thumbRadiusForMode(closeL, YES, SGRPlayerInlineModeQueue);
         }
 
         void (^springStep)(void) = ^{

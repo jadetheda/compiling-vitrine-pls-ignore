@@ -370,17 +370,30 @@ void SGRPlayerLowerRow(UIView *row) {
     // The ordinary player's controls unit, or the AI DJ's head unit (DJPlayer.x), which holds the same buttons.
     Class unit = unitOf(above).class;
     BOOL controls = SGClassNamed(unit, @"PlaybackControlsElementsUnit") || SGClassNamed(unit, @"DJMHeadUnitViewController");
-    BOOL volume = SGRPlayerVolumeOn() && controls;
+    UIView *controlsView = controls ? above : nil;
+    if (!controlsView) {
+        for (UIView *sibling in stack.subviews) {
+            Class sibUnit = unitOf(sibling).class;
+            if (SGClassNamed(sibUnit, @"PlaybackControlsElementsUnit") || SGClassNamed(sibUnit, @"DJMHeadUnitViewController")) {
+                controlsView = sibling;
+                break;
+            }
+        }
+    }
+    BOOL volume = SGRPlayerVolumeOn() && (controls || (queueOpen && controlsView != nil));
     CGFloat share = volume ? 0 : kControlsShare, lift = volume ? kVolumeLift : 0;
 
-    if (queueOpen && above && controls) {
+    if (queueOpen && controlsView) {
         // In Queue view, center the 3-button transport row at Apple Music's y = 633 pt (height - (177 + safeBottom) on 844pt),
         // which also places SGRVolumeRow halfway between play bottom (665pt) and footer top (768pt) -> y = 717..720 pt!
-        CGFloat ctrlMiddle = [stack convertPoint:above.center toView:player].y;
+        CGFloat ctrlMiddle = [stack convertPoint:controlsView.center toView:player].y;
         CGFloat targetCtrlMiddle = height - (177.0 + window.safeAreaInsets.bottom);
         CGAffineTransform queueFollow = CGAffineTransformMakeTranslation(0, round(targetCtrlMiddle - ctrlMiddle));
-        if (!CGAffineTransformEqualToTransform(above.transform, queueFollow)) above.transform = queueFollow;
+        if (!CGAffineTransformEqualToTransform(controlsView.transform, queueFollow)) controlsView.transform = queueFollow;
     } else {
+        if (!controls && controlsView && !CGAffineTransformIsIdentity(controlsView.transform)) {
+            controlsView.transform = CGAffineTransformIdentity;
+        }
         // With the volume row, the controls stay where Spotify put them and the row takes the room the footer leaves.
         // The volume row is placed against the controls where they would stand for it; one that does not show leaves them
         // following the footer as they do without it.
@@ -388,11 +401,12 @@ void SGRPlayerLowerRow(UIView *row) {
         if (above && controls && !CGAffineTransformEqualToTransform(above.transform, follow)) above.transform = follow;
     }
     SGRPlayerPaintCover(stack);
-    if (volume && !SGRPlayerPlaceVolume(stack, above, row, kVolumeMargin)) {
+    UIView *volumeAnchor = queueOpen ? (controlsView ?: above) : above;
+    if (volume && !SGRPlayerPlaceVolume(stack, volumeAnchor, row, kVolumeMargin)) {
         if (!queueOpen) {
             share = kControlsShare;
             CGAffineTransform follow = CGAffineTransformMakeTranslation(0, round(move * share));
-            if (!CGAffineTransformEqualToTransform(above.transform, follow)) above.transform = follow;
+            if (above && controls && !CGAffineTransformEqualToTransform(above.transform, follow)) above.transform = follow;
         }
     } else if (!volume) {
         SGRPlayerPlaceVolume(stack, nil, row, kVolumeMargin);

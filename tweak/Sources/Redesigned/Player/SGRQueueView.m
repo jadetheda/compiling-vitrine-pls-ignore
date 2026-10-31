@@ -14,6 +14,16 @@
 - (instancetype)initWithURI:(NSURL *)uri albumURI:(NSURL *)album artistURI:(NSURL *)artist andUID:(NSString *)uid;
 @end
 
+@interface SGRQueueSPTask : NSObject
+- (id)addCallback:(void (^)(id))callback on:(dispatch_queue_t)queue;
+- (id)addErrorCallback:(void (^)(NSError *))callback on:(dispatch_queue_t)queue;
+@end
+
+@interface SGRQueueWrapper : NSObject
+- (instancetype)initWithPlayer:(id)player;
+- (SGRQueueSPTask *)queueMultipleTracks:(NSArray *)tracks loggingParams:(id)params;
+@end
+
 #define SGRKeyQueueAutoplay @"spotifyglass.redesign.queue.autoplay"
 #define SGRKeyQueueTransitions @"spotifyglass.redesign.queue.transitions"
 
@@ -1674,6 +1684,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if (!(self = [super initWithFrame:frame])) return nil;
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     self.backgroundColor = UIColor.clearColor;
     self.clipsToBounds = NO;
 
@@ -1926,6 +1937,14 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 - (CGRect)nowPlayingArtworkFrameInView:(UIView *)targetView {
     CGRect localArt = CGRectMake(kSideMargin, kViewportTopOffset + kNowPlayingDocY, 62.0, 62.0);
     return targetView ? [self convertRect:localArt toView:targetView] : localArt;
+}
+
+- (CGRect)visibleNowPlayingArtworkFrameInView:(UIView *)targetView {
+    if (_npArtView && !_nowPlayingClipView.hidden && _scrollView.contentOffset.y <= 4.0) {
+        CGRect rect = [_npArtView convertRect:_npArtView.bounds toView:targetView ?: self];
+        if (rect.size.width >= 40.0 && rect.size.height >= 40.0) return rect;
+    }
+    return [self nowPlayingArtworkFrameInView:targetView];
 }
 
 #pragma mark - State Synchronization & Spring Row Reordering
@@ -2355,24 +2374,36 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
         return;
     }
 
-    // Case 2: Dragging started at rest near 0 (_dragStartOffsetY >= -2.0) and pulled downward into History
-    if (_dragStartOffsetY >= -2.0 && currentY < -8.0 && velocity.y <= 0.15) {
-        targetContentOffset->y = -histH;
-        _clampAtZeroOnDragOrDecel = NO;
+    // Case 2: Dragging started at rest near 0 (_dragStartOffsetY >= -2.0) and pulled downward into History.
+    // Allow natural scrolling anywhere inside [-histH .. -54 pt], avoiding a half-clipped header seam in (-54 .. 0).
+    if (_dragStartOffsetY >= -2.0) {
+        if (targetContentOffset->y < -54.0) {
+            targetContentOffset->y = MAX(-histH, targetContentOffset->y);
+            _clampAtZeroOnDragOrDecel = NO;
+        } else if ((currentY < -22.0 && velocity.y <= 0.08) || targetContentOffset->y < -22.0) {
+            targetContentOffset->y = MAX(-histH, -54.0);
+            _clampAtZeroOnDragOrDecel = NO;
+        } else if (targetContentOffset->y < 0.0) {
+            targetContentOffset->y = 0.0;
+            _clampAtZeroOnDragOrDecel = YES;
+        }
         return;
     }
 
-    // Case 3: Swiping inside History (_dragStartOffsetY < -2.0)
+    // Case 3: Swiping or scrolling inside History (_dragStartOffsetY < -2.0)
     if (_dragStartOffsetY < -2.0) {
         if (targetContentOffset->y > 120.0) {
             // Strong upward fling (projectedTargetY > +120 pt) continues smoothly into "Continue Playing"
             _clampAtZeroOnDragOrDecel = NO;
-        } else if (velocity.y > 0.12 || currentY > -histH * 0.65 || targetContentOffset->y > -histH * 0.5) {
+        } else if (targetContentOffset->y > -24.0 || (currentY > -72.0 && velocity.y > 0.12)) {
             // Moderate upward swipe (projectedTargetY <= +120 pt) docks cleanly on "Now Playing" at scrollY = 0 pt
             targetContentOffset->y = 0.0;
             _clampAtZeroOnDragOrDecel = YES;
+        } else if (targetContentOffset->y > -54.0) {
+            targetContentOffset->y = MAX(-histH, -54.0);
+            _clampAtZeroOnDragOrDecel = NO;
         } else {
-            targetContentOffset->y = -histH;
+            targetContentOffset->y = MAX(-histH, targetContentOffset->y);
             _clampAtZeroOnDragOrDecel = NO;
         }
     }
@@ -2388,6 +2419,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
     }
     UIImage *bgImg = SGRRenderPillCapsuleImage(sz, active, symbol, isTransitions);
     [pill setBackgroundImage:bgImg forState:UIControlStateNormal];
+    [pill setBackgroundImage:bgImg forState:UIControlStateHighlighted];
     [pill setImage:nil forState:UIControlStateNormal];
 }
 
@@ -2481,53 +2513,116 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
     }
 }
 
+- (void)playQueueItemViaQueueAndSkip:(SGRQueueItem *)item {
+    if (!item.uri.length) return;
+    id<SPTPlayer> player = (id<SPTPlayer>)SGPlayer();
+    Class wrapperCls = NSClassFromString(@"SPTPlayerQueueWrapperImpl");
+    Class trackCls = NSClassFromString(@"SPTPlayerTrack");
+    if (player &&
+        [wrapperCls instancesRespondToSelector:@selector(initWithPlayer:)] &&
+        [wrapperCls instancesRespondToSelector:@selector(queueMultipleTracks:loggingParams:)] &&
+        [trackCls instancesRespondToSelector:@selector(initWithURI:albumURI:artistURI:andUID:)]) {
+        NSURL *u = [NSURL URLWithString:item.uri];
+        NSURL *alb = item.albumURI.length ? [NSURL URLWithString:item.albumURI] : nil;
+        SPTPlayerTrack *fresh = u ? [[trackCls alloc] initWithURI:u albumURI:alb artistURI:nil andUID:nil] : nil;
+        if (fresh) {
+            SGRQueueWrapper *wrapper = [[wrapperCls alloc] initWithPlayer:player];
+            SGRQueueSPTask *task = [wrapper queueMultipleTracks:@[fresh] loggingParams:nil];
+            if ([task respondsToSelector:@selector(addCallback:on:)]) {
+                // Retain wrapper across async callback so ARC does not release it early
+                [task addCallback:^(__unused id val) {
+                    (void)wrapper;
+                    if ([player respondsToSelector:@selector(skipToNextTrackWithOptions:)]) {
+                        [player skipToNextTrackWithOptions:nil];
+                    } else if ([player respondsToSelector:@selector(skipToNextTrack)]) {
+                        [player skipToNextTrack];
+                    }
+                } on:dispatch_get_main_queue()];
+                if ([task respondsToSelector:@selector(addErrorCallback:on:)]) {
+                    [task addErrorCallback:^(__unused NSError *err) {
+                        (void)wrapper;
+                        SGOpenSpotifyURI([NSURL URLWithString:item.uri]);
+                    } on:dispatch_get_main_queue()];
+                }
+                return;
+            }
+        }
+    }
+    SGOpenSpotifyURI([NSURL URLWithString:item.uri]);
+}
+
 - (void)queueRowDidTap:(SGRQueueRowView *)row {
     SGRQueueItem *item = row.item;
     if (!item.uri.length) return;
     id<SPTPlayer> player = (id<SPTPlayer>)SGPlayer();
     SPTPlayerState *state = SGPlayerState();
+    __weak typeof(self) weakSelf = self;
 
     if (!row.isHistory) {
-        // Prefer exact live SPTPlayerTrack instance from state.future when within Spotify's lookahead window
-        SPTPlayerTrack *targetTrack = nil;
+        // 1. Prefer exact live SPTPlayerTrack instance from state.future when within Spotify's 2-track lookahead window
+        SPTPlayerTrack *liveFutureTrack = nil;
         NSArray *future = ([state respondsToSelector:@selector(future)] && [state.future isKindOfClass:NSArray.class]) ? state.future : @[];
         for (id cand in future) {
             if ([cand respondsToSelector:@selector(URI)] && [SGURIString(((SPTPlayerTrack *)cand).URI) isEqualToString:item.uri]) {
-                targetTrack = (SPTPlayerTrack *)cand;
+                liveFutureTrack = (SPTPlayerTrack *)cand;
                 break;
             }
         }
-        if (!targetTrack) targetTrack = [item resolvedPlayerTrack];
 
         @try {
-            if (targetTrack && [player respondsToSelector:@selector(skipToNextTrackWithOptions:track:)]) {
-                [player skipToNextTrackWithOptions:nil track:targetTrack];
+            if (liveFutureTrack && [player respondsToSelector:@selector(skipToNextTrackWithOptions:track:)]) {
+                id res = [player skipToNextTrackWithOptions:nil track:liveFutureTrack];
+                if ([res respondsToSelector:@selector(addErrorCallback:on:)]) {
+                    [(SGRQueueSPTask *)res addErrorCallback:^(__unused NSError *err) {
+                        [weakSelf playQueueItemViaQueueAndSkip:item];
+                    } on:dispatch_get_main_queue()];
+                }
                 return;
             }
-            if (row.rowIndex == 0 && [player respondsToSelector:@selector(skipToNextTrack)]) {
-                [player skipToNextTrack];
+            if (row.rowIndex == 0 && liveFutureTrack && [player respondsToSelector:@selector(skipToNextTrackWithOptions:)]) {
+                [player skipToNextTrackWithOptions:nil];
                 return;
+            }
+            // 2. Track is beyond state.future's 2-track lookahead window: try UID-backed skip first if UID is known,
+            // falling back automatically to SPTPlayerQueueWrapperImpl + skipToNextTrack so playback starts in-place!
+            SPTPlayerTrack *constructed = item.uid.length ? [item resolvedPlayerTrack] : nil;
+            if (constructed && [player respondsToSelector:@selector(skipToNextTrackWithOptions:track:)]) {
+                id res = [player skipToNextTrackWithOptions:nil track:constructed];
+                if ([res respondsToSelector:@selector(addErrorCallback:on:)]) {
+                    [(SGRQueueSPTask *)res addErrorCallback:^(__unused NSError *err) {
+                        [weakSelf playQueueItemViaQueueAndSkip:item];
+                    } on:dispatch_get_main_queue()];
+                    return;
+                }
             }
         } @catch (__unused NSException *e) {}
+
+        [self playQueueItemViaQueueAndSkip:item];
+        return;
     } else {
-        SPTPlayerTrack *targetTrack = nil;
+        SPTPlayerTrack *liveReverseTrack = nil;
         NSArray *reverse = ([state respondsToSelector:@selector(reverse)] && [state.reverse isKindOfClass:NSArray.class]) ? state.reverse : @[];
         for (id cand in reverse) {
             if ([cand respondsToSelector:@selector(URI)] && [SGURIString(((SPTPlayerTrack *)cand).URI) isEqualToString:item.uri]) {
-                targetTrack = (SPTPlayerTrack *)cand;
+                liveReverseTrack = (SPTPlayerTrack *)cand;
                 break;
             }
         }
-        if (!targetTrack) targetTrack = [item resolvedPlayerTrack];
 
         @try {
-            if (targetTrack && [player respondsToSelector:@selector(skipToPreviousTrackWithOptions:track:)]) {
-                [player skipToPreviousTrackWithOptions:nil track:targetTrack];
+            if (liveReverseTrack && [player respondsToSelector:@selector(skipToPreviousTrackWithOptions:track:)]) {
+                id res = [player skipToPreviousTrackWithOptions:nil track:liveReverseTrack];
+                if ([res respondsToSelector:@selector(addErrorCallback:on:)]) {
+                    [(SGRQueueSPTask *)res addErrorCallback:^(__unused NSError *err) {
+                        [weakSelf playQueueItemViaQueueAndSkip:item];
+                    } on:dispatch_get_main_queue()];
+                }
                 return;
             }
         } @catch (__unused NSException *e) {}
+
+        [self playQueueItemViaQueueAndSkip:item];
     }
-    SGOpenSpotifyURI([NSURL URLWithString:item.uri]);
 }
 
 - (void)queueRowDidCommitDelete:(SGRQueueRowView *)row {
@@ -2662,6 +2757,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 
 - (UIViewController *)previewControllerForItem:(SGRQueueItem *)item artImage:(UIImage *)artImage {
     UIViewController *vc = [[UIViewController alloc] init];
+    vc.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     CGFloat cardW = 250.0;
     CGFloat cardH = 86.0;
     vc.preferredContentSize = CGSizeMake(cardW, cardH);
@@ -2728,6 +2824,8 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
         while (top.presentedViewController) top = top.presentedViewController;
         if (top) {
             UIActivityViewController *avc = [[UIActivityViewController alloc] initWithActivityItems:@[trackURI] applicationActivities:nil];
+            avc.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+            SGPresentDark(avc);
             [top presentViewController:avc animated:YES completion:nil];
         }
     }];
