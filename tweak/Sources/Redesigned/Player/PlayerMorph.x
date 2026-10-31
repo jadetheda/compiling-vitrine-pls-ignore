@@ -196,7 +196,7 @@ static CGFloat screenRadius(void) {
     if (bar.superview == container) [container bringSubviewToFront:bar];
 
     UIImage *artwork = SGRNowPlayingArtwork(NULL, NULL);
-    if (artwork && !CGRectIsNull(_barArtwork)) {
+    if (!SGRPlayerQueueOpen() && artwork && !CGRectIsNull(_barArtwork)) {
         _cover = [[UIImageView alloc] initWithImage:artwork];
         _cover.userInteractionEnabled = NO;
         _cover.contentMode = UIViewContentModeScaleAspectFill;

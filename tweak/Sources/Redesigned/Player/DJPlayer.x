@@ -23,7 +23,7 @@ static const CGFloat kSlots[4] = {0.2, 0.4, 0.6, 0.8};
 // The DJ button's blue disc is 48pt, a good deal more than the glyphs beside it; drawn this much of that.
 static const CGFloat kDJButtonScale = 0.88;
 static char kPrevKey, kNextKey, kPlayKey, kGlyphKey;
-static char kShareKey, kConnectKey, kDJKey, kQueueKey;
+static char kShareKey, kConnectKey, kDJKey;
 
 #pragma mark - previous and next
 
@@ -109,17 +109,6 @@ static void placeHolder(UIView *holder, CGFloat from, CGFloat to, CGFloat scale)
     if (!CGAffineTransformEqualToTransform(holder.transform, transform)) holder.transform = transform;
 }
 
-static SGRGlyphButton *glyphButtonIn(UIView *host, const void *key, NSString *symbol, NSString *title, UIColor *tint, void (^tap)(void)) {
-    SGRGlyphButton *button = objc_getAssociatedObject(host, key);
-    if (!button) {
-        button = [SGRGlyphButton buttonWithSymbol:symbol pointSize:kFooterGlyphSize title:title];
-        button.glyph.tintColor = tint;
-        button.onTap = tap;
-        objc_setAssociatedObject(host, key, button, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    if (button.superview != host) [host addSubview:button];
-    return button;
-}
 
 #pragma mark the row
 
@@ -151,16 +140,10 @@ static void styleFooter(UIViewController *unit) {
         SGRPlayerCoverConnect(connectHolder, glyph);
     }
 
-    SGRGlyphButton *queue = glyphButtonIn(host, &kQueueKey, @"list.bullet", @"Queue", SGRPlayerQueueOpen() ? SGRPrimary() : SGRSecondary(), ^{
-        SGRPlayerToggleQueue();
-    });
-    BOOL queueOpen = SGRPlayerQueueOpen();
-    queue.glyph.tintColor = queueOpen ? SGRPrimary() : SGRSecondary();
-    queue.backgroundColor = queueOpen ? [UIColor colorWithWhite:1.0 alpha:0.18] : UIColor.clearColor;
-    queue.layer.cornerRadius = 22.0;
-    queue.clipsToBounds = YES;
-    queue.bounds = CGRectMake(0, 0, 44, 44);
+    SGRGlyphButton *queue = SGRPlayerQueueGlyphIn(host);
+    queue.bounds = CGRectMake(0, 0, 48, 36);
     queue.center = CGPointMake(slot(2), middleY);
+    SGRPlayerQueueChanged();
 
     // The DJ button at the last place. Connect's view reaches a long way to the right of its glyph, so the
     // DJ's goes above it in the stack, or Connect would take its touches.

@@ -138,11 +138,34 @@ static void suppressButton(UIView *button) {
 }
 
 // Each is looked for only in its own end of the row, so a row without it (a podcast's) costs a walk of one
-// element, not the unit.
+// element, not the unit. While the inline queue is open, both are hidden on the main transport bar since
+// Shuffle and Repeat live in the queue's 4-pill header bar, matching Apple Music.
 static void hideShuffleAndRepeat(UIView *host, UIStackView *row) {
     sg_buttonsHost = host;
-    if (sg_hideShuffle) suppressButton(SGRFindByIdentifier(row.arrangedSubviews.firstObject, kShuffleID, &kShuffleKey));
-    if (sg_hideRepeat) suppressButton(SGRFindByIdentifier(row.arrangedSubviews.lastObject, kRepeatID, &kRepeatKey));
+    UIView *shuffle = SGRFindByIdentifier(row.arrangedSubviews.firstObject, kShuffleID, &kShuffleKey);
+    UIView *repeat = SGRFindByIdentifier(row.arrangedSubviews.lastObject, kRepeatID, &kRepeatKey);
+    BOOL queueOpen = SGRPlayerQueueOpen();
+    if (sg_hideShuffle) {
+        suppressButton(shuffle);
+    } else if (shuffle) {
+        shuffle.alpha = queueOpen ? 0 : 1;
+        shuffle.userInteractionEnabled = !queueOpen;
+        shuffle.accessibilityElementsHidden = queueOpen;
+    }
+    if (sg_hideRepeat) {
+        suppressButton(repeat);
+    } else if (repeat) {
+        repeat.alpha = queueOpen ? 0 : 1;
+        repeat.userInteractionEnabled = !queueOpen;
+        repeat.accessibilityElementsHidden = queueOpen;
+    }
+}
+
+void SGRPlayerControlsQueueChanged(void) {
+    UIView *host = sg_buttonsHost;
+    if (!host) return;
+    UIStackView *row = (UIStackView *)SGFindRemembered(host, &kRowKey, ^BOOL(UIView *v) { return SGIsRow(v); });
+    if (row) hideShuffleAndRepeat(host, row);
 }
 
 #pragma mark - play

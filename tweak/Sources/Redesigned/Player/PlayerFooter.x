@@ -125,14 +125,16 @@ SGRGlyphButton *SGRPlayerLyricsGlyphIn(UIView *host) {
 void SGRPlayerQueueChanged(void) {
     SGRPlayerMotionLyricsChanged();
     SGRPlayerVisualiserUpdate();
+    SGRPlayerControlsQueueChanged();
     SGRGlyphButton *glyph = sg_queueGlyph;
     if (!glyph) return;
     BOOL open = SGRPlayerQueueOpen();
     BOOL animated = glyph.window && !SGRPlayerIsTransitioning();
     void (^mark)(void) = ^{
-        glyph.glyph.tintColor = open ? SGRPrimary() : SGRSecondary();
-        glyph.backgroundColor = open ? [UIColor colorWithWhite:1.0 alpha:0.18] : UIColor.clearColor;
-        glyph.layer.cornerRadius = glyph.bounds.size.height > 0 ? glyph.bounds.size.height / 2.0 : 22.0;
+        glyph.glyph.tintColor = open ? [UIColor colorWithWhite:0.08 alpha:0.95] : SGRSecondary();
+        glyph.backgroundColor = open ? [UIColor colorWithWhite:1.0 alpha:0.92] : UIColor.clearColor;
+        glyph.layer.cornerRadius = glyph.bounds.size.height > 0 ? glyph.bounds.size.height / 2.0 : 18.0;
+        glyph.layer.cornerCurve = kCACornerCurveContinuous;
         glyph.clipsToBounds = YES;
     };
     if (animated) SGRAnimate(SGRMotionFade, mark, nil);
@@ -143,7 +145,7 @@ SGRGlyphButton *SGRPlayerQueueGlyphIn(UIView *host) {
     SGRGlyphButton *glyph = objc_getAssociatedObject(host, &kQueueGlyphKey);
     if (!glyph) {
         glyph = [SGRGlyphButton buttonWithSymbol:kQueueSymbol pointSize:kLyricsGlyphSize title:@"Queue"];
-        glyph.glyph.tintColor = SGRPlayerQueueOpen() ? SGRPrimary() : SGRSecondary();
+        glyph.glyph.tintColor = SGRPlayerQueueOpen() ? [UIColor colorWithWhite:0.08 alpha:0.95] : SGRSecondary();
         glyph.onTap = ^{ SGRPlayerToggleQueue(); };
         objc_setAssociatedObject(host, &kQueueGlyphKey, glyph, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
@@ -433,7 +435,7 @@ void SGRPlayerLowerRow(UIView *row) {
     SGRPlayerVanish(arrangedAround(queue, host));
 
     SGRGlyphButton *queueButton = SGRPlayerQueueGlyphIn(host);
-    queueButton.bounds = CGRectMake(0, 0, 44, 44);
+    queueButton.bounds = CGRectMake(0, 0, 48, 36);
     queueButton.center = CGPointMake(round(width * (rtl ? kLeading : kTrailing)), middleY);
     SGRPlayerQueueChanged();
 
