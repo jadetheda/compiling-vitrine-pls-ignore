@@ -17,7 +17,7 @@
 #import "Shared/Navigation/Links.h"
 #import "Player.h"
 
-static const CGFloat kSkipGlyphSize = 32, kFooterGlyphSize = 20;
+static const CGFloat kSkipGlyphSize = 32;
 // Where the four footer glyphs sit, as parts of the footer's width: Lyrics, Connect, Queue, the DJ button.
 static const CGFloat kSlots[4] = {0.2, 0.4, 0.6, 0.8};
 // The DJ button's blue disc is 48pt, a good deal more than the glyphs beside it; drawn this much of that.
