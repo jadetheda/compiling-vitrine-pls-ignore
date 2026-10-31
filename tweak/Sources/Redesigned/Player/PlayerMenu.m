@@ -12,15 +12,24 @@
 //
 // The item says under its name what is not as Spotify plays it, so the menu reads as a settings summary.
 #import "Core/SGCore.h"
+#import "Headers/SPTPlayer.h"
 #import "Redesigned/ContextMenu/ContextMenu.h"
+#import "Redesigned/Kit/SGRKit.h"
+#import "Shared/Navigation/Links.h"
 #import "Shared/Player/PlayerState.h"
+#import "Shared/Player/SleepTimer.h"
 #import "Shared/Player/SpeedPitch.h"
 #import "Shared/Lyrics/Lyrics.h"
 #import "Shared/LyricsSources/LyricsSources.h"
 #import "Settings/SGPageStyle.h"
 #import "Player.h"
 
-static __weak UIView *sg_moreButton;   // the ⋯ the panels come from
+static __weak UIView *sg_moreButton;   // Spotify's ⋯ in HeaderElementsUnit
+static __weak UIView *sg_proxyButton;  // Queue's Now Playing ⋯ proxy
+
+static UIView *activeMoreAnchor(void) {
+    return SGRSystemMenuActiveAnchor() ?: sg_moreButton ?: sg_proxyButton;
+}
 
 static UIImage *symbol(NSString *name) {
     return [UIImage systemImageNamed:name];
@@ -51,9 +60,136 @@ static UIAction *soundMenu(void) {
     if (SGPlayerPitchAvailable() && !pitchFollowing() && SGPlayerPitch() != 0) [changed addObject:semitonesText(SGPlayerPitch())];
     if (SGPlayerReverb() > 0) [changed addObject:[NSString stringWithFormat:@"Reverb %.0f%%", SGPlayerReverb()]];
     UIAction *open = [UIAction actionWithTitle:@"Speed, Pitch & Reverb" image:symbol(@"slider.horizontal.3") identifier:nil
-                                       handler:^(UIAction *action) { SGPlayerShowSpeedPitchPanel(sg_moreButton); }];
+                                       handler:^(UIAction *action) { SGPlayerShowSpeedPitchPanel(activeMoreAnchor()); }];
     open.subtitle = changed.count ? [changed componentsJoinedByString:@", "] : @"Normal";
     return open;
+}
+
+static void clearSpotifyNativeSleepTimerIfAny(void) {
+    SPTPlayerState *state = SGPlayerState();
+    SPTSleepTimer *native = [state respondsToSelector:@selector(sleepTimer)] ? state.sleepTimer : nil;
+    if ([native respondsToSelector:@selector(type)] && native.type != 0) {
+        id player = SGPlayer();
+        if ([player respondsToSelector:@selector(setSleepTimer:durationSeconds:options:loggingParams:)]) {
+            @try {
+                [(id<SPTPlayer>)player setSleepTimer:0 durationSeconds:nil options:nil loggingParams:nil];
+            } @catch (__unused NSException *e) {}
+        }
+    }
+}
+
+static NSString *formatRemainingTimer(NSTimeInterval left) {
+    if (left <= 0) return @"Ending…";
+    if (left < 60) return [NSString stringWithFormat:@"%lds left", (long)MAX(1, llround(left))];
+    long mins = (long)ceil(left / 60.0);
+    if (mins >= 60 && (mins % 60) == 0) {
+        long hrs = mins / 60;
+        return hrs == 1 ? @"1 hr left" : [NSString stringWithFormat:@"%ld hr left", hrs];
+    }
+    return [NSString stringWithFormat:@"%ld min left", mins];
+}
+
+NSString *SGRPlayerSleepTimerSummary(BOOL *activeOut) {
+    SGSleepTimerMode mode = SGSleepTimerCurrentMode();
+    if (mode == SGSleepTimerAtTime) {
+        NSDate *end = SGSleepTimerEnd();
+        NSTimeInterval left = end ? end.timeIntervalSinceNow : 0;
+        if (left > 0) {
+            if (activeOut) *activeOut = YES;
+            return formatRemainingTimer(left);
+        }
+    } else if (mode == SGSleepTimerEndOfTrack) {
+        if (activeOut) *activeOut = YES;
+        return @"End of Track";
+    } else if (mode == SGSleepTimerEndOfAlbum) {
+        if (activeOut) *activeOut = YES;
+        return @"End of Album or Playlist";
+    }
+
+    SPTPlayerState *state = SGPlayerState();
+    SPTSleepTimer *native = [state respondsToSelector:@selector(sleepTimer)] ? state.sleepTimer : nil;
+    NSUInteger nativeType = [native respondsToSelector:@selector(type)] ? native.type : 0;
+    if (nativeType == 1 && [native respondsToSelector:@selector(timestamp)] && [native.timestamp isKindOfClass:NSDate.class]) {
+        NSTimeInterval left = native.timestamp.timeIntervalSinceNow;
+        if (left > 0) {
+            if (activeOut) *activeOut = YES;
+            return formatRemainingTimer(left);
+        }
+    } else if (nativeType == 2) {
+        if (activeOut) *activeOut = YES;
+        return @"End of Track";
+    }
+
+    if (activeOut) *activeOut = NO;
+    return @"Off";
+}
+
+UIMenu *SGRPlayerSleepTimerMenu(NSString *title, void (^onChange)(void)) {
+    BOOL active = NO;
+    NSString *summary = SGRPlayerSleepTimerSummary(&active);
+    SGSleepTimerMode modMode = SGSleepTimerCurrentMode();
+    SPTPlayerState *state = SGPlayerState();
+    SPTSleepTimer *native = [state respondsToSelector:@selector(sleepTimer)] ? state.sleepTimer : nil;
+    NSUInteger nativeType = [native respondsToSelector:@selector(type)] ? native.type : 0;
+
+    NSMutableArray<UIMenuElement *> *groups = [NSMutableArray array];
+
+    if (active) {
+        UIAction *turnOff = [UIAction actionWithTitle:@"Turn Off Timer" image:symbol(@"xmark.circle") identifier:nil handler:^(__unused UIAction *action) {
+            SGSetSleepTimer(SGSleepTimerOff, 0);
+            clearSpotifyNativeSleepTimerIfAny();
+            if (onChange) onChange();
+        }];
+        turnOff.attributes = UIMenuElementAttributesDestructive;
+        turnOff.subtitle = summary;
+        [groups addObject:[UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[turnOff]]];
+    }
+
+    NSArray<NSArray *> *presets = @[
+        @[@"5 Minutes", @300],
+        @[@"10 Minutes", @600],
+        @[@"15 Minutes", @900],
+        @[@"30 Minutes", @1800],
+        @[@"45 Minutes", @2700],
+        @[@"1 Hour", @3600],
+    ];
+    NSMutableArray<UIAction *> *timeActions = [NSMutableArray arrayWithCapacity:presets.count];
+    for (NSArray *preset in presets) {
+        NSString *label = preset[0];
+        NSTimeInterval secs = [preset[1] doubleValue];
+        UIAction *act = [UIAction actionWithTitle:label image:nil identifier:nil handler:^(__unused UIAction *action) {
+            clearSpotifyNativeSleepTimerIfAny();
+            SGSetSleepTimer(SGSleepTimerAtTime, secs);
+            if (onChange) onChange();
+        }];
+        [timeActions addObject:act];
+    }
+    [groups addObject:[UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:timeActions]];
+
+    UIAction *endTrack = [UIAction actionWithTitle:@"End of Track" image:symbol(@"music.note") identifier:nil handler:^(__unused UIAction *action) {
+        clearSpotifyNativeSleepTimerIfAny();
+        SGSetSleepTimer(SGSleepTimerEndOfTrack, 0);
+        if (onChange) onChange();
+    }];
+    if (modMode == SGSleepTimerEndOfTrack || (modMode == SGSleepTimerOff && nativeType == 2)) {
+        endTrack.state = UIMenuElementStateOn;
+    }
+
+    UIAction *endContext = [UIAction actionWithTitle:@"End of Album or Playlist" image:symbol(@"music.note.list") identifier:nil handler:^(__unused UIAction *action) {
+        clearSpotifyNativeSleepTimerIfAny();
+        SGSetSleepTimer(SGSleepTimerEndOfAlbum, 0);
+        if (onChange) onChange();
+    }];
+    if (modMode == SGSleepTimerEndOfAlbum) {
+        endContext.state = UIMenuElementStateOn;
+    }
+    [groups addObject:[UIMenu menuWithTitle:@"" image:nil identifier:nil options:UIMenuOptionsDisplayInline children:@[endTrack, endContext]]];
+
+    UIMenu *menu = [UIMenu menuWithTitle:title ?: @"" image:title.length ? symbol(active ? @"moon.zzz.fill" : @"moon.zzz") : nil identifier:nil options:0 children:groups];
+    if (title.length) {
+        menu.subtitle = summary;
+    }
+    return menu;
 }
 
 static NSString *sheetKind(void);
@@ -189,21 +325,29 @@ static const CGFloat kSourcePanelWidth = 300, kSourcePanelMaxHeight = 440;
 }
 @end
 
+void SGRPlayerShowLyricsSourcePanel(UIView *from) {
+    NSString *track = SGKaraokePlayingTrack();
+    if (!SGLyricsEnabled() || !track.length) return;
+    SGRLyricsSourcePanel *panel = [SGRLyricsSourcePanel new];
+    panel.track = track;
+    panel.preferredContentSize = CGSizeMake(kSourcePanelWidth, 200);
+    SGPresentPopover(panel, from ?: activeMoreAnchor());
+}
+
 static UIAction *lyricsSourceItem(void) {
     NSString *track = SGKaraokePlayingTrack();
     if (!SGLyricsEnabled() || !track.length || [sheetKind() isEqualToString:@"episode"]) return nil;
     UIAction *open = [UIAction actionWithTitle:@"Lyrics Source" image:symbol(@"quote.bubble") identifier:nil handler:^(UIAction *action) {
-        SGRLyricsSourcePanel *panel = [SGRLyricsSourcePanel new];
-        panel.track = track;
-        panel.preferredContentSize = CGSizeMake(kSourcePanelWidth, 200);
-        SGPresentPopover(panel, sg_moreButton);
+        SGRPlayerShowLyricsSourcePanel(activeMoreAnchor());
     }];
     open.subtitle = SGLyricsCreditFor(track);
     return open;
 }
 
 static NSArray<UIMenuElement *> *playerItems(void) {
-    NSMutableArray<UIMenuElement *> *items = [NSMutableArray arrayWithObject:soundMenu()];
+    NSMutableArray<UIMenuElement *> *items = [NSMutableArray array];
+    [items addObject:soundMenu()];
+    [items addObject:SGRPlayerSleepTimerMenu(@"Sleep Timer", nil)];
     if (SGPlayerMenuOffersAnimatedArtwork()) {
         // Buttons named for what they do, not checkmarks: the HIG's changeable label for a toggled item.
         NSArray<NSArray *> *backgrounds = @[
@@ -234,4 +378,15 @@ static NSString *sheetKind(void) {
 void SGRPlayerMenuWatch(UIView *button) {
     sg_moreButton = button;
     SGRSystemMenuWatch(button, ^NSArray<UIMenuElement *> *{ return playerItems(); }, ^NSString *{ return sheetKind(); });
+    UIView *proxy = sg_proxyButton;
+    if (proxy && [button isKindOfClass:UIControl.class]) {
+        SGRSystemMenuWatchTarget(proxy, (UIControl *)button, ^NSArray<UIMenuElement *> *{ return playerItems(); }, ^NSString *{ return sheetKind(); });
+    }
+}
+
+void SGRPlayerMenuWatchProxy(UIView *button) {
+    if (!button) return;
+    sg_proxyButton = button;
+    UIControl *target = [sg_moreButton isKindOfClass:UIControl.class] ? (UIControl *)sg_moreButton : nil;
+    SGRSystemMenuWatchTarget(button, target, ^NSArray<UIMenuElement *> *{ return playerItems(); }, ^NSString *{ return sheetKind(); });
 }

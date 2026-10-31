@@ -58,6 +58,7 @@ static CFTimeInterval sg_requestedAt;
 // The session whose sheet is in the mod's own window, and the presentation the mod is making itself.
 static __weak SGRMenuSession *sg_hosted;
 static BOOL sg_redirecting;
+static __weak UIView *sg_activeAnchor;
 
 // The player's quick items: what the item says, its symbol, the title of Spotify's row it fires (compared
 // without case) and that row's item number, the accessibility identifier of its Encore ListRow on 9.1.78. The
@@ -342,6 +343,7 @@ static UIMenu *inlineGroup(NSArray<UIMenuElement *> *children) {
 @implementation SGRMenuFront
 
 - (UIContextMenuConfiguration *)contextMenuInteraction:(UIContextMenuInteraction *)interaction configurationForMenuAtLocation:(CGPoint)location {
+    sg_activeAnchor = self.superview ?: self;
     SGRMenuSession *session = [SGRMenuSession new];
     session.direct = YES;
     session.opened = YES;
@@ -1127,7 +1129,11 @@ BOOL SGPlayerMenuReplaced(UIViewController *menu) {
 
 #pragma mark - the ⋯
 
-void SGRSystemMenuWatch(UIView *button, SGRMenuItems items, SGRMenuKind kind) {
+UIView *SGRSystemMenuActiveAnchor(void) {
+    return sg_activeAnchor;
+}
+
+void SGRSystemMenuWatchTarget(UIView *button, UIControl *spotifyTarget, SGRMenuItems items, SGRMenuKind kind) {
     if (![button isKindOfClass:UIControl.class]) return;
     SGRMenuFront *front = objc_getAssociatedObject(button, &kFrontKey);
     if (!front) {
@@ -1145,7 +1151,7 @@ void SGRSystemMenuWatch(UIView *button, SGRMenuItems items, SGRMenuKind kind) {
         objc_setAssociatedObject(button, &kFrontKey, front, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         SGLog(@"system menu: the player's ⋯ (%@) opens the menu from a button of the mod's over it", NSStringFromClass(button.class));
     }
-    front.spotify = (UIControl *)button;
+    front.spotify = [spotifyTarget isKindOfClass:UIControl.class] ? spotifyTarget : nil;
     front.items = items;
     front.kind = kind;
     // VoiceOver reaches the mod's button rather than Spotify's ⋯, with the ⋯'s own words, so it opens the menu too.
@@ -1173,6 +1179,10 @@ void SGRSystemMenuWatch(UIView *button, SGRMenuItems items, SGRMenuKind kind) {
         SGLog(@"system menu: the mod's ⋯ at %@ over Spotify's at %@ in the window; a touch at the ⋯'s middle reaches %@",
               NSStringFromCGRect(over), NSStringFromCGRect(under), reaches);
     }
+}
+
+void SGRSystemMenuWatch(UIView *button, SGRMenuItems items, SGRMenuKind kind) {
+    SGRSystemMenuWatchTarget(button, [button isKindOfClass:UIControl.class] ? (UIControl *)button : nil, items, kind);
 }
 
 UIControl *SGRSystemMenuFront(UIView *button) {

@@ -46,3 +46,12 @@ BOOL SGRPlayerIsTransitioning(void);
 // SGPlayerTransitionNotification and SGPlayerTransitionEndedNotification as blocks, for as long as
 // `owner` lives. The blocks are handed the owner so they need not capture it.
 void SGRObservePlayerTransition(id owner, void (^began)(id owner), void (^ended)(id owner));
+
+#pragma mark - collection (ArtistFollow.x)
+
+// Adds or removes a Spotify entity URL (e.g. spotify:track:...) in the user's collection (Liked Songs),
+// returning YES if Spotify's collection platform was reached.
+BOOL SGRCollectionAddURL(NSURL *url, BOOL showConfirmation);
+BOOL SGRCollectionRemoveURL(NSURL *url, BOOL showConfirmation);
+// One-shot query of whether `url` is currently saved in the user's collection; invokes `completion` on the main queue.
+void SGRCollectionCheckSaved(NSURL *url, void (^completion)(BOOL known, BOOL saved));

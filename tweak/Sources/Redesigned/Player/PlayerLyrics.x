@@ -293,6 +293,82 @@ static void setHeaderShownForQueue(BOOL shown, BOOL finalizeHidden) {
     });
 }
 
+static BOOL isGenericHeaderPrefixText(NSString *text) {
+    if (!text.length) return YES;
+    NSString *upper = text.uppercaseString;
+    if ([upper hasPrefix:@"PLAYING FROM"]) return YES;
+    if ([upper isEqualToString:@"RECOMMENDED FOR YOU"]) return YES;
+    if ([upper isEqualToString:@"NOW PLAYING"]) return YES;
+    if ([text caseInsensitiveCompare:@"Queue"] == NSOrderedSame) return YES;
+    if ([text caseInsensitiveCompare:@"Play Queue"] == NSOrderedSame) return YES;
+    return NO;
+}
+
+NSString *SGRPlayerHeaderContextTitle(void) {
+    UIView *header = sg_header.viewIfLoaded;
+    if (!header) return nil;
+    static char kHdrMin1Key, kHdrMin2Key, kHdrMoreKey;
+    UIView *minBtn = SGRFindByIdentifier(header, @"now-playing-minimize-button", &kHdrMin1Key)
+                  ?: SGRFindByIdentifier(header, @"mobile-nowplaying-close-button", &kHdrMin2Key);
+    UIView *moreBtn = SGRFindByIdentifier(header, @"Context menu", &kHdrMoreKey);
+
+    NSMutableArray<UILabel *> *labels = [NSMutableArray array];
+    SGForEachView(header, ^(UIView *v) {
+        if (![v isKindOfClass:UILabel.class]) return;
+        if (minBtn && [v isDescendantOfView:minBtn]) return;
+        if (moreBtn && [v isDescendantOfView:moreBtn]) return;
+        for (UIView *p = v; p && p != header; p = p.superview) {
+            if (p.hidden || p.alpha < 0.01) return;
+        }
+        NSString *txt = [((UILabel *)v).text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (txt.length) [labels addObject:(UILabel *)v];
+    });
+    if (!labels.count) return nil;
+
+    [labels sortUsingComparator:^NSComparisonResult(UILabel *a, UILabel *b) {
+        CGFloat ya = CGRectGetMinY([a convertRect:a.bounds toView:header]);
+        CGFloat yb = CGRectGetMinY([b convertRect:b.bounds toView:header]);
+        if (fabs(ya - yb) > 2.0) return ya < yb ? NSOrderedAscending : NSOrderedDescending;
+        return a.font.pointSize < b.font.pointSize ? NSOrderedAscending : NSOrderedDescending;
+    }];
+
+    for (UILabel *lbl in [labels reverseObjectEnumerator]) {
+        NSString *txt = [lbl.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (!isGenericHeaderPrefixText(txt)) return txt;
+    }
+
+    // Single-line header like "PLAYING FROM YOUR LIBRARY" or "PLAYING FROM SEARCH"
+    NSString *only = [labels.lastObject.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSRange pf = [only rangeOfString:@"PLAYING FROM " options:NSCaseInsensitiveSearch | NSAnchoredSearch];
+    if (pf.location != NSNotFound && only.length > pf.length) {
+        NSString *tail = [[only substringFromIndex:pf.length] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if ([tail caseInsensitiveCompare:@"YOUR LIBRARY"] == NSOrderedSame) return @"Your Library";
+        if ([tail caseInsensitiveCompare:@"SEARCH"] == NSOrderedSame) return @"Search";
+        if (tail.length && [tail caseInsensitiveCompare:@"PLAYLIST"] != NSOrderedSame &&
+            [tail caseInsensitiveCompare:@"ALBUM"] != NSOrderedSame &&
+            [tail caseInsensitiveCompare:@"ARTIST"] != NSOrderedSame) {
+            return tail.localizedCapitalizedString;
+        }
+    }
+    return nil;
+}
+
+void SGRPlayerMinimizeIfOpen(void) {
+    UIView *header = sg_header.viewIfLoaded;
+    if (header) {
+        static char kMin1Key, kMin2Key;
+        UIView *minBtn = SGRFindByIdentifier(header, @"now-playing-minimize-button", &kMin1Key)
+                      ?: SGRFindByIdentifier(header, @"mobile-nowplaying-close-button", &kMin2Key);
+        if (minBtn) {
+            SGRActivate(minBtn);
+            return;
+        }
+    }
+    if (sg_player.presentingViewController) {
+        [sg_player dismissViewControllerAnimated:YES completion:nil];
+    }
+}
+
 #pragma mark - the measurements
 
 typedef struct {
@@ -1114,7 +1190,9 @@ static void replace(void) {
     }
     if (!stageOpen) return;
 
-    SGRPlayerLyricsOverlay *overlay = objc_getAssociatedObject(host, &kOverlayKey);
+    SGRPlayerLyricsOverlay *overlay = (sg_inlineMode == SGRPlayerInlineModeQueue)
+        ? overlayIn(host)
+        : objc_getAssociatedObject(host, &kOverlayKey);
     if (!overlay.superview) return;
     if (overlay.superview == host && host.subviews.lastObject != overlay) [host bringSubviewToFront:overlay];
     if (sg_alone && sg_inlineMode == SGRPlayerInlineModeLyrics) {
@@ -1127,9 +1205,34 @@ static void replace(void) {
     place(overlay, host, l);
     overlay.thumb.transform = thumbTransform(l);
     overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, YES, sg_inlineMode);
-    if (sg_inlineMode == SGRPlayerInlineModeLyrics) overlay.lyrics.frame = overlay.stage.bounds;
-    else if (sg_inlineMode == SGRPlayerInlineModeQueue && overlay.existingQueue) {
-        [overlay.existingQueue setNeedsLayout];
+    if (sg_inlineMode == SGRPlayerInlineModeLyrics) {
+        overlay.lyrics.frame = overlay.stage.bounds;
+    } else if (sg_inlineMode == SGRPlayerInlineModeQueue) {
+        SGRPlayerSetCoverHidden(YES);
+        if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 0;
+        overlay.stage.hidden = YES;
+        overlay.stage.alpha = 0;
+        overlay.thumb.alpha = 0;
+        overlay.thumb.hidden = YES;
+        SGRQueueView *q = overlay.queue;
+        BOOL newlyMounted = q.hidden || q.alpha < 0.01;
+        q.hidden = NO;
+        q.alpha = 1.0;
+        [q setTransitionArtworkHidden:NO];
+        [q setContentSlideOffset:0.0 opacity:1.0];
+        if (CGAffineTransformIsIdentity(q.transform)) {
+            CGRect qStage = [overlay convertRect:l.stage fromView:host];
+            if (!CGSizeEqualToSize(q.bounds.size, qStage.size) ||
+                hypot(q.center.x - CGRectGetMidX(qStage), q.center.y - CGRectGetMidY(qStage)) > 0.5) {
+                q.bounds = (CGRect){CGPointZero, qStage.size};
+                q.center = CGPointMake(CGRectGetMidX(qStage), CGRectGetMidY(qStage));
+            }
+        }
+        if (newlyMounted) {
+            [q prepareForOpenTransition];
+        } else {
+            [q setNeedsLayout];
+        }
     }
     SGRPlayerCoverList().alpha = 0;
 }
@@ -1152,11 +1255,13 @@ static void replace(void) {
         __weak UIView *weakHost = host;
         dispatch_async(dispatch_get_main_queue(), ^{
             UIView *strongHost = weakHost;
-            if (!strongHost) return;
+            if (!strongHost || sg_inlineMode == SGRPlayerInlineModeQueue) return;
             SGRPlayerLyricsOverlay *warm = ensureOverlayObject(strongHost);
             SGRQueueView *q = warm.queue;
-            q.hidden = YES;
-            q.alpha = 0.0;
+            if (sg_inlineMode != SGRPlayerInlineModeQueue) {
+                q.hidden = YES;
+                q.alpha = 0.0;
+            }
         });
         SGLog(@"redesign player: the lyrics have the player's view %.0fx%.0f", host.bounds.size.width, host.bounds.size.height);
     }
@@ -1164,8 +1269,7 @@ static void replace(void) {
 }
 
 // The bar morphs back out of a full size cover as the player closes, so the thumbnail is put away first.
-// While Queue is open, interactive pull-downs keep the Queue inside the card sheet and only reset once
-// the player actually finishes disappearing.
+// While Queue is open, swiping down to minimize Now Playing and reopening it preserves the open Queue state.
 - (void)viewWillDisappear:(BOOL)animated {
     if (sg_inlineMode == SGRPlayerInlineModeLyrics) {
         setMode(SGRPlayerInlineModeNone, NO);
@@ -1176,7 +1280,7 @@ static void replace(void) {
 }
 
 - (void)viewDidDisappear:(BOOL)animated {
-    if (sg_inlineMode != SGRPlayerInlineModeNone) {
+    if (sg_inlineMode == SGRPlayerInlineModeLyrics) {
         setMode(SGRPlayerInlineModeNone, NO);
     }
     %orig;
@@ -1233,6 +1337,10 @@ static void durationUnitLaidOut(UIViewController *unit) {
     %orig;
     sg_header = (UIViewController *)self;
     replace();
+    if (sg_inlineMode == SGRPlayerInlineModeQueue && sg_host) {
+        SGRPlayerLyricsOverlay *overlay = objc_getAssociatedObject(sg_host, &kOverlayKey);
+        [overlay.existingQueue updateWithState:SGPlayerState()];
+    }
 }
 %end
 

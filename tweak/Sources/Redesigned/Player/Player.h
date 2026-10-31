@@ -114,6 +114,30 @@ void SGRPlayerLayoutFooterForQueue(void);
 
 // The queue glyph of the footer, made on first ask in `host`.
 SGRGlyphButton *SGRPlayerQueueGlyphIn(UIView *host);
+
+// Live context title displayed at the top of Now Playing (HeaderElementsUnit), nil/empty when unavailable.
+NSString *SGRPlayerHeaderContextTitle(void);
+// Minimizes the fullscreen Now Playing sheet so an entity page opened beneath it is visible.
+void SGRPlayerMinimizeIfOpen(void);
+
+// Configurable 4-slot playback pill bar at the top of Continue Playing in Queue.
+#define SGRKeyQueuePill1 @"spotifyglass.redesign.queue.pill1"
+#define SGRKeyQueuePill2 @"spotifyglass.redesign.queue.pill2"
+#define SGRKeyQueuePill3 @"spotifyglass.redesign.queue.pill3"
+#define SGRKeyQueuePill4 @"spotifyglass.redesign.queue.pill4"
+typedef NS_ENUM(NSInteger, SGRQueuePillKind) {
+    SGRQueuePillShuffle = 0,
+    SGRQueuePillRepeat = 1,
+    SGRQueuePillAutoplay = 2,
+    SGRQueuePillTransitions = 3,
+    SGRQueuePillSleepTimer = 4,
+    SGRQueuePillSpeedPitch = 5,
+    SGRQueuePillLyricsSource = 6,
+    SGRQueuePillNone = 7,
+};
+NSArray<NSString *> *SGRQueuePillNames(void);
+SGRQueuePillKind SGRQueuePillKindForSlot(NSUInteger slot);
+void SGRSetQueuePillKindForSlot(NSUInteger slot, SGRQueuePillKind kind);
 // An Endless_DJMusicImpl class of the AI DJ's player by its Swift name, under the mangled spelling or the
 // dotted one the trees print; nil when the app has neither.
 static inline Class SGRDJClass(NSString *name) {
@@ -238,3 +262,11 @@ CGFloat SGRSeekShareAt(UISlider *slider, CGPoint point);
 // The more button's menu opens as the system menu with the player's own items (PlayerMenu.m). Called from
 // PlayerHeader.x with Spotify's more button on every pass; watching it again changes nothing.
 void SGRPlayerMenuWatch(UIView *button);
+// Watches a proxy ⋯ button (Queue's Now Playing mini-card ⋯) so tapping it opens the exact same system menu.
+void SGRPlayerMenuWatchProxy(UIView *button);
+// Opens the Lyrics Source popover anchored to `from`.
+void SGRPlayerShowLyricsSourcePanel(UIView *from);
+// Current Sleep Timer status summary ("Off", "15 min left", "End of Track"...) and whether a timer is active.
+NSString *SGRPlayerSleepTimerSummary(BOOL *activeOut);
+// Builds the Sleep Timer UIMenu (with optional submenu title and post-selection callback).
+UIMenu *SGRPlayerSleepTimerMenu(NSString *title, void (^onChange)(void));

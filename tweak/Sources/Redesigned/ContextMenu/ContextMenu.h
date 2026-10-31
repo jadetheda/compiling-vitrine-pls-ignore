@@ -46,6 +46,11 @@ typedef NSString *(^SGRMenuKind)(void);
 // ⋯, and replaces `items` and `kind`. The pinned ⋯ of the entity pages needs no call: the Kit records its taps
 // (SGRPinnedMoreRecentButton).
 void SGRSystemMenuWatch(UIView *button, SGRMenuItems items, SGRMenuKind kind);
+// Same as SGRSystemMenuWatch, but `button` is a proxy ⋯ (such as the expanded Queue's Now Playing ⋯) that fires
+// `spotifyTarget` (Spotify's own Context menu control) when opened.
+void SGRSystemMenuWatchTarget(UIView *button, UIControl *spotifyTarget, SGRMenuItems items, SGRMenuKind kind);
+// Whichever watched ⋯ button opened the current or most recent system menu, so popovers anchor to it.
+UIView *SGRSystemMenuActiveAnchor(void);
 
 // The mod's button over `button`, which takes the ⋯'s touches once SGRSystemMenuWatch has been called; nil before.
 UIControl *SGRSystemMenuFront(UIView *button);

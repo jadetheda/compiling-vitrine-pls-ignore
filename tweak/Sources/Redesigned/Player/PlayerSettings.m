@@ -332,6 +332,12 @@ SGModRow *SGRLyricsHideRow(void) {
     return row;
 }
 
+static SGModRow *queuePillRow(NSString *title, NSUInteger slot) {
+    return SGMenuRow(title, SGRQueuePillNames(),
+                     ^NSString * { return SGRQueuePillNames()[(NSUInteger)SGRQueuePillKindForSlot(slot)]; },
+                     ^(NSInteger index) { SGRSetQueuePillKindForSlot(slot, (SGRQueuePillKind)index); });
+}
+
 UIViewController *SGRPlayerSettingsPage(NSArray *more) {
     SGRPlayerShowcase *showcase = [[SGRPlayerShowcase alloc] initWithFrame:CGRectMake(0, 0, 320, kCardMinHeight)];
     UISegmentedControl *backgrounds = [[UISegmentedControl alloc] initWithItems:SGRPlayerBackgroundNames()];
@@ -364,6 +370,11 @@ UIViewController *SGRPlayerSettingsPage(NSArray *more) {
                                       SGOptionRow(@"Follow the cover", nil, SGRKeyPlayerFollowsCover)],
                        @"Volume puts a slider under the controls for this iPhone, or the speaker's while Spotify plays on another device. "
                        @"Follow the cover paints the like, shuffle, repeat, device and queue buttons, and the mini player's device and like, in the color of the song playing."),
+        SGNotedSection(@"Queue", @[queuePillRow(@"Button 1", 0),
+                                   queuePillRow(@"Button 2", 1),
+                                   queuePillRow(@"Button 3", 2),
+                                   queuePillRow(@"Button 4", 3)],
+                       @"Choose what each button at the top of Continue Playing does, or set any slot to None to remove it. You can also press and hold a button in the queue to change it."),
         SGNotedSection(@"Mini player", SGRNowPlayingBarRows(),
                        @"Apple Music style moves the now playing bar in between two tabs as you scroll down."), nil];
     [sections addObjectsFromArray:more];

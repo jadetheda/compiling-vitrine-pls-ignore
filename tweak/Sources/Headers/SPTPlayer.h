@@ -4,9 +4,13 @@
 
 @interface SPTPlayerTrack : NSObject
 @property (nonatomic, readonly) id URI;
+@property (nonatomic, readonly, copy) NSString *UID;
 @property (nonatomic, readonly) id artistURI;
 @property (nonatomic, readonly) NSString *artistName;
 @property (nonatomic, readonly) NSString *trackTitle;
+@property (nonatomic, readonly) NSString *albumTitle;
+@property (nonatomic, readonly) id albumURI;
+@property (nonatomic, readonly) id imageURL;
 // Every credited artist: artist_uri and artist_name, then artist_uri:1, artist_name:1 and on.
 @property (nonatomic, readonly) NSDictionary<NSString *, NSString *> *metadata;
 // Where the track came from in the tracks to come: the album or playlist, a hand queue, autoplay
@@ -48,6 +52,9 @@
 // The tracks to come and the ones played, nearest first; SPTPlayerTrack each, read with a type check.
 @property (nonatomic, readonly) NSArray *future;
 @property (nonatomic, readonly) NSArray *reverse;
+@property (nonatomic, readonly) NSDictionary<NSString *, NSString *> *contextMetadata;
+@property (nonatomic, readonly) NSDictionary<NSString *, NSString *> *pageMetadata;
+@property (nonatomic, readonly) id queueRevision;
 @end
 
 @protocol SPTPlayer <NSObject>
@@ -68,4 +75,8 @@
 - (id)setShufflingContext:(BOOL)on;
 - (id)setRepeatingContext:(BOOL)on;
 - (id)setRepeatingTrack:(BOOL)on;
+- (void)fetchState:(void (^)(SPTPlayerState *state))callback reverseCap:(NSUInteger)reverseCap futureCap:(NSUInteger)futureCap on:(dispatch_queue_t)queue;
+- (void)fetchQueue:(void (^)(id queue))callback on:(dispatch_queue_t)queue;
+- (id)setQueue:(id)queue;
+- (id)setSleepTimer:(NSUInteger)type durationSeconds:(NSNumber *)seconds options:(id)options loggingParams:(id)loggingParams;
 @end
