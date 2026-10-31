@@ -162,6 +162,15 @@ static BOOL keepsTitle(void) {
                 if (inDur) return inDur;
             }
         }
+        UIView *stack = sg_host ? SGRFindByIdentifier(sg_host, @"npv.bottomStackView", &kStackKey) : nil;
+        if (stack && !CGRectContainsPoint(stack.bounds, [stack convertPoint:point fromView:self])) {
+            UIView *info = sg_info.viewIfLoaded, *floating = sg_floating.viewIfLoaded;
+            for (UIView *sub in [stack.subviews reverseObjectEnumerator]) {
+                if (sub == info || sub == floating || sub == dur || sub.hidden || sub.alpha < 0.01) continue;
+                UIView *inSub = [sub hitTest:[sub convertPoint:point fromView:self] withEvent:event];
+                if (inSub) return inSub;
+            }
+        }
         return nil;
     }
     UIView *row = isStageOpen() && (!sg_alone || keepsTitle()) ? sg_info.viewIfLoaded : nil;
@@ -269,7 +278,7 @@ static void placeQueueBottomChrome(UIView *host, BOOL queueOpen) {
     SGRPlayerLayoutFooterForQueue();
 }
 
-static void setHeaderShownForQueue(BOOL shown, __unused BOOL finalizeHidden) {
+static void setHeaderShownForQueue(BOOL shown, BOOL finalizeHidden) {
     UIView *header = sg_header.viewIfLoaded;
     if (!header) return;
     if (header.hidden) header.hidden = NO;
@@ -277,7 +286,9 @@ static void setHeaderShownForQueue(BOOL shown, __unused BOOL finalizeHidden) {
     header.userInteractionEnabled = shown;
     SGForEachView(header, ^(UIView *v) {
         if ([v isKindOfClass:UIVisualEffectView.class]) {
+            if (shown && v.hidden) v.hidden = NO;
             SGRShowGlass(v, shown);
+            if (!shown && finalizeHidden) v.hidden = YES;
         }
     });
 }
@@ -822,6 +833,8 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
             [sg_rest invalidate];
             sg_rest = nil;
         } else {
+            SGRPlayerCoverList().alpha = 0.0;
+            SGRPlayerSetCoverHidden(NO);
             SGRQueueView *q = overlay.existingQueue;
             if (q) [q setTransitionArtworkHidden:YES];
             overlay.stage.hidden = NO;
@@ -870,6 +883,7 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
 
     // Dedicated Apple Music 0.40s (damping 0.85) matched-geometry spring for Queue Open & Close
     if (isQueueTransition) {
+        BOOL wasMoving = sg_moving;
         sg_moving = animated;
         place(overlay, host, l);
         CGAffineTransform away = thumbTransform(l);
@@ -887,18 +901,24 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
             overlay.existingLyrics.alpha = 0.0;
         }
 
+        // Hide only the 310x310 static cover + shadow plate beneath overlay.thumb so Spotify's inline
+        // lyric preview inside SGRPlayerCoverList() fades smoothly inside springStep on both Open & Close.
+        SGRPlayerSetCoverHidden(YES);
+
         if (open) {
             [q prepareForOpenTransition];
             q.hidden = NO;
             q.alpha = 1.0;
             [q setTransitionArtworkHidden:YES];
-            [q setContentSlideOffset:(SGRReduceMotion() ? 0.0 : 60.0) opacity:0.0];
-
-            overlay.thumb.hidden = NO;
-            overlay.thumb.alpha = fades ? 0.0 : 1.0;
-            overlay.thumb.transform = fades ? away : CGAffineTransformIdentity;
-            overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, fades, SGRPlayerInlineModeQueue);
-            SGRPlayerCoverList().alpha = 0.0;
+            if (!wasMoving) {
+                [q setContentSlideOffset:(SGRReduceMotion() ? 0.0 : 60.0) opacity:0.0];
+                overlay.thumb.hidden = NO;
+                overlay.thumb.alpha = fades ? 0.0 : 1.0;
+                overlay.thumb.transform = fades ? away : CGAffineTransformIdentity;
+                overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, fades, SGRPlayerInlineModeQueue);
+            } else {
+                overlay.thumb.hidden = NO;
+            }
         } else {
             SGRLyricsLayout closeL = l;
             CGRect liveThumb = [q visibleNowPlayingArtworkFrameInView:host];
@@ -911,12 +931,15 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
                     clipTitle(sg_titleElement, CGFLOAT_MAX);
                 }
             }
+            BOOL interruptedMidOpen = (wasMoving && !overlay.thumb.hidden);
             [q setTransitionArtworkHidden:YES];
-            [q setContentSlideOffset:0.0 opacity:1.0];
-            overlay.thumb.hidden = NO;
-            overlay.thumb.alpha = 1.0;
-            overlay.thumb.transform = away;
-            overlay.cover.layer.cornerRadius = thumbRadiusForMode(closeL, YES, SGRPlayerInlineModeQueue);
+            if (!interruptedMidOpen) {
+                [q setContentSlideOffset:0.0 opacity:1.0];
+                overlay.thumb.hidden = NO;
+                overlay.thumb.alpha = 1.0;
+                overlay.thumb.transform = away;
+                overlay.cover.layer.cornerRadius = thumbRadiusForMode(closeL, YES, SGRPlayerInlineModeQueue);
+            }
         }
 
         void (^springStep)(void) = ^{
@@ -924,6 +947,7 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
             overlay.cover.layer.cornerRadius = thumbRadiusForMode(l, open || fades, SGRPlayerInlineModeQueue);
             overlay.thumb.alpha = (!open && fades) ? 0.0 : 1.0;
             [q setContentSlideOffset:(open ? 0.0 : (SGRReduceMotion() ? 0.0 : 60.0)) opacity:(open ? 1.0 : 0.0)];
+            SGRPlayerCoverList().alpha = open ? 0.0 : 1.0;
             sg_floating.viewIfLoaded.alpha = open ? 0.0 : 1.0;
             if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = open ? 0.0 : 1.0;
             placeTitleRow(l);
@@ -937,6 +961,7 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
                 [q setContentSlideOffset:0.0 opacity:1.0];
                 overlay.thumb.alpha = 0.0;
                 overlay.thumb.hidden = YES;
+                SGRPlayerCoverList().alpha = 0.0;
                 if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 0.0;
                 setHeaderShownForQueue(NO, YES);
                 return;
@@ -945,6 +970,7 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
             [q setContentSlideOffset:0.0 opacity:1.0];
             q.hidden = YES;
             q.alpha = 0.0;
+            SGRPlayerSetCoverHidden(NO);
             SGRPlayerCoverList().alpha = 1.0;
             if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 1.0;
             setHeaderShownForQueue(YES, NO);

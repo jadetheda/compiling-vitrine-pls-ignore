@@ -8,6 +8,7 @@
 #import "Shared/Lyrics/Lyrics.h"
 #import "Shared/LyricsSources/LyricsSources.h"
 #import "Shared/Navigation/Links.h"
+#import "Shared/SpotifyPrefs/SpotifyPrefs.h"
 #import "Player.h"
 
 @interface SPTPlayerTrack (SGRQueueConstruct)
@@ -22,6 +23,11 @@
 @interface SGRQueueWrapper : NSObject
 - (instancetype)initWithPlayer:(id)player;
 - (SGRQueueSPTask *)queueMultipleTracks:(NSArray *)tracks loggingParams:(id)params;
+@end
+
+@interface _TtC31Preferences_CorePreferencesImpl28SPTPreferencesImplementation (SGRQueueAutoplay)
+- (BOOL)autoplay;
+- (void)setAutoplay:(BOOL)on;
 @end
 
 #define SGRKeyQueueAutoplay @"spotifyglass.redesign.queue.autoplay"
@@ -374,6 +380,7 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
 @property (nonatomic, readonly) BOOL isShuffling;
 
 + (instancetype)shared;
+- (void)ensureResolvedIfNeeded;
 - (void)clearHistory;
 - (void)deleteContinuePlayingItemWithKey:(NSString *)key;
 - (void)moveContinuePlayingItemFromIndex:(NSUInteger)fromIdx toIndex:(NSUInteger)toIdx;
@@ -584,11 +591,12 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
     if (contextChanged) {
         _activeContextURI = [ctxURI copy];
         _contextEntries = nil;
+        _loadingContextURI = nil;
         [_deletedKeys removeAllObjects];
         [_shuffledOrderKeys removeAllObjects];
         [_customOrderedKeys removeAllObjects];
         _historySeededFromContext = NO;
-        [self resolveContextIfSupported:ctxURI];
+        [self resolveContextIfSupported:ctxURI triesLeft:3];
     }
 
     BOOL reportedShuffle = state.options ? state.options.shufflingContext : NO;
@@ -879,12 +887,41 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
 
 #pragma mark - spclient Context & Extended Metadata Resolution
 
-- (void)resolveContextIfSupported:(NSString *)contextURI {
-    if (!contextURI.length) return;
-    if (!([contextURI hasPrefix:@"spotify:album:"] ||
-          [contextURI hasPrefix:@"spotify:playlist:"] ||
-          [contextURI hasPrefix:@"spotify:artist:"] ||
-          [contextURI hasPrefix:@"spotify:collection"])) {
+static NSString *SGRNormalizedContextURIForResolve(NSString *contextURI) {
+    if ([contextURI hasPrefix:@"spotify:user:"]) {
+        NSRange r = [contextURI rangeOfString:@":playlist:"];
+        if (r.location != NSNotFound) {
+            NSString *pid = [contextURI substringFromIndex:r.location + r.length];
+            if (pid.length > 0) return [@"spotify:playlist:" stringByAppendingString:pid];
+        }
+    }
+    return contextURI;
+}
+
+- (void)ensureResolvedIfNeeded {
+    if (!_activeContextURI.length) return;
+    if (!_contextEntries) {
+        if (!_loadingContextURI) {
+            [self resolveContextIfSupported:_activeContextURI triesLeft:3];
+        }
+        return;
+    }
+    for (SGRContextTrackEntry *ce in _contextEntries) {
+        if (ce.uri.length == 36 && [ce.uri hasPrefix:@"spotify:track:"] &&
+            !_metadataCache[ce.uri] && ![_inFlightMetadataURIs containsObject:ce.uri]) {
+            [self fetchMissingExtendedMetadataForEntries:_contextEntries contextURI:_activeContextURI triesLeft:3];
+            break;
+        }
+    }
+}
+
+- (void)resolveContextIfSupported:(NSString *)contextURI triesLeft:(NSInteger)triesLeft {
+    if (!contextURI.length || triesLeft <= 0) return;
+    NSString *resolveURI = SGRNormalizedContextURIForResolve(contextURI);
+    if (!([resolveURI hasPrefix:@"spotify:album:"] ||
+          [resolveURI hasPrefix:@"spotify:playlist:"] ||
+          [resolveURI hasPrefix:@"spotify:artist:"] ||
+          [resolveURI hasPrefix:@"spotify:collection"])) {
         return;
     }
     if ([_loadingContextURI isEqualToString:contextURI]) return;
@@ -893,7 +930,19 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
     __weak typeof(self) weakSelf = self;
     SGSpclientHeaders(^(NSDictionary<NSString *, NSString *> *headers) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf || ![strongSelf->_activeContextURI isEqualToString:contextURI] || !headers.count) return;
+        if (!strongSelf || ![strongSelf->_activeContextURI isEqualToString:contextURI]) return;
+        if (!headers.count) {
+            strongSelf->_loadingContextURI = nil;
+            if (triesLeft > 1) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    __strong typeof(weakSelf) retrySelf = weakSelf;
+                    if (retrySelf && [retrySelf->_activeContextURI isEqualToString:contextURI] && !retrySelf->_contextEntries) {
+                        [retrySelf resolveContextIfSupported:contextURI triesLeft:triesLeft - 1];
+                    }
+                });
+            }
+            return;
+        }
 
         NSMutableArray<SGRContextTrackEntry *> *collected = [NSMutableArray array];
         __block NSUInteger pageCount = 0;
@@ -954,7 +1003,17 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
                         __strong typeof(weakSelf) s = weakSelf;
                         if (!s || ![s->_activeContextURI isEqualToString:contextURI]) return;
                         s->_loadingContextURI = nil;
-                        if (collected.count == 0) return;
+                        if (collected.count == 0) {
+                            if (triesLeft > 1) {
+                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                                    __strong typeof(weakSelf) retrySelf = weakSelf;
+                                    if (retrySelf && [retrySelf->_activeContextURI isEqualToString:contextURI] && !retrySelf->_contextEntries) {
+                                        [retrySelf resolveContextIfSupported:contextURI triesLeft:triesLeft - 1];
+                                    }
+                                });
+                            }
+                            return;
+                        }
                         s->_contextEntries = [collected copy];
                         if (!s->_historyClearedByUser && !s->_historySeededFromContext && !s->_isShuffling &&
                             s->_nowPlayingItem && [s->_nowPlayingItem.uri isEqualToString:s->_initialSeedTrackURI]) {
@@ -962,63 +1021,93 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
                         }
                         [s rebuildContinuePlayingWithState:SGPlayerState() shuffleJustTurnedOn:NO];
                         [s notifyObservers];
-                        [s fetchMissingExtendedMetadataForEntries:collected headers:headers contextURI:contextURI];
+                        [s fetchMissingExtendedMetadataForEntries:collected contextURI:contextURI triesLeft:3];
                     });
                 }
             }] resume];
         };
-        fetchPage([@"https://spclient.wg.spotify.com/context-resolve/v1/" stringByAppendingString:contextURI]);
+        fetchPage([@"https://spclient.wg.spotify.com/context-resolve/v1/" stringByAppendingString:resolveURI]);
     });
 }
 
 - (void)fetchMissingExtendedMetadataForEntries:(NSArray<SGRContextTrackEntry *> *)entries
-                                       headers:(NSDictionary<NSString *, NSString *> *)headers
-                                    contextURI:(NSString *)contextURI {
-    NSMutableArray<NSString *> *needed = [NSMutableArray array];
-    for (SGRContextTrackEntry *ce in entries) {
-        if (ce.uri.length == 36 && [ce.uri hasPrefix:@"spotify:track:"] &&
-            !_metadataCache[ce.uri] && ![_inFlightMetadataURIs containsObject:ce.uri]) {
-            [_inFlightMetadataURIs addObject:ce.uri];
-            [needed addObject:ce.uri];
-        }
-    }
-    if (needed.count == 0) return;
-
+                                    contextURI:(NSString *)contextURI
+                                     triesLeft:(NSInteger)triesLeft {
+    if (triesLeft <= 0 || !entries.count) return;
     __weak typeof(self) weakSelf = self;
-    NSUInteger batchSize = 90;
-    for (NSUInteger offset = 0; offset < needed.count; offset += batchSize) {
-        NSArray<NSString *> *chunk = [needed subarrayWithRange:NSMakeRange(offset, MIN(batchSize, needed.count - offset))];
-        NSData *body = SGRBuildBatchedTrackMetadataRequest(chunk);
-        NSURL *url = [NSURL URLWithString:@"https://spclient.wg.spotify.com/extended-metadata/v0/extended-metadata"];
-        NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-        req.HTTPMethod = @"POST";
-        req.timeoutInterval = 12.0;
-        req.allHTTPHeaderFields = headers;
-        [req setValue:@"application/x-protobuf" forHTTPHeaderField:@"Content-Type"];
-        [req setValue:@"application/x-protobuf" forHTTPHeaderField:@"Accept"];
-        req.HTTPBody = body;
-        [NSURLProtocol setProperty:@YES forKey:SGLyricsOwnRequestKey inRequest:req];
-
-        [[NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-            NSInteger status = [resp isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
-            NSDictionary<NSString *, SGRResolvedTrackMeta *> *parsed = (status == 200 && data.length > 0 && !err)
-                ? SGRParseBatchedTrackMetadataReply(data) : nil;
-            dispatch_async(dispatch_get_main_queue(), ^{
-                __strong typeof(weakSelf) s = weakSelf;
-                if (!s) return;
-                for (NSString *u in chunk) [s->_inFlightMetadataURIs removeObject:u];
-                if (parsed.count > 0) {
-                    [s->_metadataCache addEntriesFromDictionary:parsed];
-                    for (SGRQueueItem *h in s->_historyItems) [s enrichQueueItem:h];
-                    if (s->_nowPlayingItem) [s enrichQueueItem:s->_nowPlayingItem];
-                    if ([s->_activeContextURI isEqualToString:contextURI]) {
-                        [s rebuildContinuePlayingWithState:SGPlayerState() shuffleJustTurnedOn:NO];
+    SGSpclientHeaders(^(NSDictionary<NSString *, NSString *> *headers) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (!headers.count) {
+            if (triesLeft > 1) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    __strong typeof(weakSelf) retrySelf = weakSelf;
+                    if (retrySelf) {
+                        [retrySelf fetchMissingExtendedMetadataForEntries:entries contextURI:contextURI triesLeft:triesLeft - 1];
                     }
-                    [s notifyObservers];
-                }
-            });
-        }] resume];
-    }
+                });
+            }
+            return;
+        }
+
+        NSMutableArray<NSString *> *needed = [NSMutableArray array];
+        for (SGRContextTrackEntry *ce in entries) {
+            if (ce.uri.length == 36 && [ce.uri hasPrefix:@"spotify:track:"] &&
+                !strongSelf->_metadataCache[ce.uri] && ![strongSelf->_inFlightMetadataURIs containsObject:ce.uri]) {
+                [strongSelf->_inFlightMetadataURIs addObject:ce.uri];
+                [needed addObject:ce.uri];
+            }
+        }
+        if (needed.count == 0) return;
+
+        NSUInteger batchSize = 90;
+        for (NSUInteger offset = 0; offset < needed.count; offset += batchSize) {
+            NSArray<NSString *> *chunk = [needed subarrayWithRange:NSMakeRange(offset, MIN(batchSize, needed.count - offset))];
+            NSData *body = SGRBuildBatchedTrackMetadataRequest(chunk);
+            NSURL *url = [NSURL URLWithString:@"https://spclient.wg.spotify.com/extended-metadata/v0/extended-metadata"];
+            NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+            req.HTTPMethod = @"POST";
+            req.timeoutInterval = 12.0;
+            req.allHTTPHeaderFields = headers;
+            [req setValue:@"application/x-protobuf" forHTTPHeaderField:@"Content-Type"];
+            [req setValue:@"application/x-protobuf" forHTTPHeaderField:@"Accept"];
+            req.HTTPBody = body;
+            [NSURLProtocol setProperty:@YES forKey:SGLyricsOwnRequestKey inRequest:req];
+
+            [[NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+                NSInteger status = [resp isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
+                NSDictionary<NSString *, SGRResolvedTrackMeta *> *parsed = (status == 200 && data.length > 0 && !err)
+                    ? SGRParseBatchedTrackMetadataReply(data) : nil;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    __strong typeof(weakSelf) s = weakSelf;
+                    if (!s) return;
+                    for (NSString *u in chunk) [s->_inFlightMetadataURIs removeObject:u];
+                    if (parsed.count > 0) {
+                        [s->_metadataCache addEntriesFromDictionary:parsed];
+                        for (SGRQueueItem *h in s->_historyItems) [s enrichQueueItem:h];
+                        if (s->_nowPlayingItem) [s enrichQueueItem:s->_nowPlayingItem];
+                        if ([s->_activeContextURI isEqualToString:contextURI]) {
+                            [s rebuildContinuePlayingWithState:SGPlayerState() shuffleJustTurnedOn:NO];
+                        }
+                        [s notifyObservers];
+                    } else if (triesLeft > 1) {
+                        NSMutableArray<SGRContextTrackEntry *> *retryChunkEntries = [NSMutableArray arrayWithCapacity:chunk.count];
+                        for (NSString *u in chunk) {
+                            SGRContextTrackEntry *ce = [[SGRContextTrackEntry alloc] init];
+                            ce.uri = u;
+                            [retryChunkEntries addObject:ce];
+                        }
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                            __strong typeof(weakSelf) retrySelf = weakSelf;
+                            if (retrySelf) {
+                                [retrySelf fetchMissingExtendedMetadataForEntries:retryChunkEntries contextURI:contextURI triesLeft:triesLeft - 1];
+                            }
+                        });
+                    }
+                });
+            }] resume];
+        }
+    });
 }
 
 @end
@@ -1080,10 +1169,10 @@ static void SGRDrawTransitionsOverlappingCircles(CGContextRef cg, CGPoint center
     [[inkColor colorWithAlphaComponent:0.58] setStroke];
     [leftRing stroke];
 
-    // 2. Clear overlapping interior under the right disc (+1.1pt separation gap)
+    // 2. Clear overlapping interior of the left ring directly beneath the right solid donut
     CGContextSetBlendMode(cg, kCGBlendModeClear);
     UIBezierPath *occluder = [UIBezierPath bezierPathWithArcCenter:CGPointMake(rightX, center.y)
-                                                            radius:rightOuterR + 0.6
+                                                            radius:rightOuterR
                                                         startAngle:0
                                                           endAngle:(CGFloat)(M_PI * 2.0)
                                                          clockwise:YES];
@@ -1665,9 +1754,8 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
     BOOL _transitionsEnabled;
     CGSize _lastPillRenderSize;
 
-    // Scroll Detent State (scrollY = 0 pt anchor)
+    // Scroll Detent State (scrollY = 0 pt anchor, steady contentInset.top = histH with zero mid-drag mutation)
     CGFloat _dragStartOffsetY;
-    BOOL _historyUnlocked;
     BOOL _clampAtZeroOnDragOrDecel;
     BOOL _didSetInitialOffset;
 
@@ -1697,11 +1785,11 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
     _queueRowViews = [NSMutableArray array];
     _queueRowsByKey = [NSMutableDictionary dictionary];
 
-    _autoplayEnabled = [NSUserDefaults.standardUserDefaults boolForKey:SGRKeyQueueAutoplay];
+    _autoplayEnabled = SGFlag(SGRKeyQueueAutoplay, NO);
     if ([NSUserDefaults.standardUserDefaults objectForKey:SGKeyAutoMix]) {
-        _transitionsEnabled = SGEnabled(SGKeyAutoMix);
+        _transitionsEnabled = SGFlag(SGKeyAutoMix, NO);
     } else {
-        _transitionsEnabled = [NSUserDefaults.standardUserDefaults boolForKey:SGRKeyQueueTransitions];
+        _transitionsEnabled = SGFlag(SGRKeyQueueTransitions, NO);
     }
 
     [self buildViewHierarchy];
@@ -1904,13 +1992,13 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 #pragma mark - Open / Close Transition Helpers
 
 - (void)prepareForOpenTransition {
-    _historyUnlocked = NO;
+    [[SGRQueueSession shared] ensureResolvedIfNeeded];
     _clampAtZeroOnDragOrDecel = NO;
     _didSetInitialOffset = YES;
     [self syncFromSessionAnimatedReorder:NO forceRebuild:YES];
     [self setNeedsLayout];
     [self layoutIfNeeded];
-    _scrollView.contentInset = UIEdgeInsetsMake(0.0, 0.0, 36.0, 0.0);
+    _scrollView.contentInset = UIEdgeInsetsMake([self historyTotalHeight], 0.0, 36.0, 0.0);
     _scrollView.contentOffset = CGPointZero;
     [self updateStickyHeadersAndClipping];
 }
@@ -1954,11 +2042,11 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 }
 
 - (void)reloadTracks {
-    _historyUnlocked = NO;
+    [[SGRQueueSession shared] ensureResolvedIfNeeded];
     _clampAtZeroOnDragOrDecel = NO;
     _didSetInitialOffset = YES;
     [self syncFromSessionAnimatedReorder:NO forceRebuild:YES];
-    _scrollView.contentInset = UIEdgeInsetsMake(0.0, 0.0, 36.0, 0.0);
+    _scrollView.contentInset = UIEdgeInsetsMake([self historyTotalHeight], 0.0, 36.0, 0.0);
     _scrollView.contentOffset = CGPointZero;
     [self updateStickyHeadersAndClipping];
 }
@@ -1971,8 +2059,11 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 - (void)syncFromSessionAnimatedReorder:(BOOL)animateReorder forceRebuild:(BOOL)forceRebuild {
     SGRQueueSession *session = [SGRQueueSession shared];
     SPTPlayerState *state = SGPlayerState();
+    _autoplayEnabled = SGFlag(SGRKeyQueueAutoplay, NO);
     if ([NSUserDefaults.standardUserDefaults objectForKey:SGKeyAutoMix]) {
-        _transitionsEnabled = SGEnabled(SGKeyAutoMix);
+        _transitionsEnabled = SGFlag(SGKeyAutoMix, NO);
+    } else {
+        _transitionsEnabled = SGFlag(SGRKeyQueueTransitions, NO);
     }
     [self updatePlaybackPillsWithState:state];
 
@@ -2135,14 +2226,23 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
     return kHistoryHeaderHeight + _historyItems.count * kHistoryRowPitch + kHistoryBottomGap;
 }
 
-- (void)applyLockedOrUnlockedHistoryInset {
-    CGFloat histH = _historyUnlocked ? [self historyTotalHeight] : 0.0;
+- (void)applyHistoryInsetPreservingOffset {
+    CGFloat histH = [self historyTotalHeight];
     UIEdgeInsets targetInset = UIEdgeInsetsMake(histH, 0.0, 36.0, 0.0);
-    if (!UIEdgeInsetsEqualToEdgeInsets(_scrollView.contentInset, targetInset)) {
-        CGPoint savedOffset = _scrollView.contentOffset;
-        _scrollView.contentInset = targetInset;
-        _scrollView.contentOffset = savedOffset;
+    if (UIEdgeInsetsEqualToEdgeInsets(_scrollView.contentInset, targetInset)) return;
+    // Never mutate UIScrollView.contentInset mid-drag or mid-deceleration, which shifts UIKit's pan anchor under the finger.
+    if (histH > 0.0 && (_scrollView.isTracking || _scrollView.isDecelerating)) return;
+
+    CGFloat oldTop = _scrollView.contentInset.top;
+    CGPoint savedOffset = _scrollView.contentOffset;
+    if (histH == 0.0 && savedOffset.y < 0.0) {
+        savedOffset.y = 0.0;
+    } else if (savedOffset.y < -2.0 && oldTop > 0.0 && histH > 0.0) {
+        // A finished track appended at the bottom of History shifts upper History rows by -(histH - oldTop) in docY
+        savedOffset.y -= (histH - oldTop);
     }
+    _scrollView.contentInset = targetInset;
+    _scrollView.contentOffset = savedOffset;
 }
 
 - (void)layoutSubviews {
@@ -2169,11 +2269,10 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 
     if (!_didSetInitialOffset) {
         _didSetInitialOffset = YES;
-        _historyUnlocked = NO;
-        _scrollView.contentInset = UIEdgeInsetsMake(0.0, 0.0, 36.0, 0.0);
+        _scrollView.contentInset = UIEdgeInsetsMake([self historyTotalHeight], 0.0, 36.0, 0.0);
         _scrollView.contentOffset = CGPointZero;
     } else {
-        [self applyLockedOrUnlockedHistoryInset];
+        [self applyHistoryInsetPreservingOffset];
     }
 
     // Section 1: Now Playing Card subviews (62x62 art at x=28, docY=14.7 -> screen (28.0, 86.7))
@@ -2285,27 +2384,24 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 
 #pragma mark - Scroll-Stop Detent at scrollY = 0 pt
 
+- (BOOL)scrollViewShouldScrollToTop:(UIScrollView *)scrollView {
+    _clampAtZeroOnDragOrDecel = NO;
+    [scrollView setContentOffset:CGPointZero animated:YES];
+    return NO;
+}
+
 - (void)scrollViewWillBeginDragging:(UIScrollView *)scrollView {
     for (SGRQueueRowView *row in _queueRowViews) {
         if (row.isSwipeParked) [row closeSwipeAnimated:YES];
     }
     _dragStartOffsetY = scrollView.contentOffset.y;
-    if (_dragStartOffsetY > 2.0) {
-        // User started dragging inside "Continue Playing": lock minContentOffset.y = 0 so downward pan/fling
-        // stops cleanly at scrollY = 0 with zero overshoot into History.
-        _clampAtZeroOnDragOrDecel = YES;
-        if (_historyUnlocked) {
-            _historyUnlocked = NO;
-            [self applyLockedOrUnlockedHistoryInset];
-        }
-    } else {
-        _clampAtZeroOnDragOrDecel = NO;
-    }
+    // User started dragging inside "Continue Playing": clamp minContentOffset.y = 0 so downward pan/fling
+    // stops cleanly at scrollY = 0 with zero overshoot into History, without ever mutating contentInset mid-drag.
+    _clampAtZeroOnDragOrDecel = (_dragStartOffsetY > 2.0);
 }
 
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
     CGFloat y = scrollView.contentOffset.y;
-    CGFloat histH = [self historyTotalHeight];
 
     // Hard stop at scrollY = 0 whenever returning upward from "Continue Playing" (both finger drag & deceleration)
     if (_clampAtZeroOnDragOrDecel && y < 0.0) {
@@ -2317,45 +2413,24 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
         return;
     }
 
-    // Unlock History ONLY when user pulls downward starting from rest at scrollY <= 2.0 pt
-    if (scrollView.isTracking && _dragStartOffsetY <= 2.0 && y < -0.5 && histH > 0.0 && !_historyUnlocked) {
-        CGPoint panVel = [scrollView.panGestureRecognizer velocityInView:scrollView];
-        if (panVel.y > 0.0) { // Finger moving downward on screen -> negative scrollView velocityY
-            _historyUnlocked = YES;
-            [self applyLockedOrUnlockedHistoryInset];
-        }
-    }
-
-    // Re-lock History once scrolled into "Continue Playing" (> 2 pt)
-    if (!scrollView.isTracking && y > 2.0 && _historyUnlocked) {
-        _historyUnlocked = NO;
-        [self applyLockedOrUnlockedHistoryInset];
-    }
-
     [self updateStickyHeadersAndClipping];
 }
 
-- (void)scrollViewDidEndDecelerating:(UIScrollView *)scrollView {
+- (void)scrollViewDidEndDecelerating:(__unused UIScrollView *)scrollView {
     _clampAtZeroOnDragOrDecel = NO;
-    if (scrollView.contentOffset.y >= -0.5 && _historyUnlocked) {
-        _historyUnlocked = NO;
-        [self applyLockedOrUnlockedHistoryInset];
-    }
+    [self applyHistoryInsetPreservingOffset];
 }
 
-- (void)scrollViewDidEndDragging:(UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
+- (void)scrollViewDidEndDragging:(__unused UIScrollView *)scrollView willDecelerate:(BOOL)decelerate {
     if (!decelerate) {
         _clampAtZeroOnDragOrDecel = NO;
-        if (scrollView.contentOffset.y >= -0.5 && _historyUnlocked) {
-            _historyUnlocked = NO;
-            [self applyLockedOrUnlockedHistoryInset];
-        }
+        [self applyHistoryInsetPreservingOffset];
     }
 }
 
 - (void)scrollViewWillEndDragging:(UIScrollView *)scrollView withVelocity:(CGPoint)velocity targetContentOffset:(inout CGPoint *)targetContentOffset {
     CGFloat histH = [self historyTotalHeight];
-    if (histH <= 0.0 || !_historyUnlocked) {
+    if (histH <= 0.0) {
         if (targetContentOffset->y < 0.0) {
             targetContentOffset->y = 0.0;
             _clampAtZeroOnDragOrDecel = YES;
@@ -2365,7 +2440,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 
     CGFloat currentY = scrollView.contentOffset.y;
 
-    // Case 1: Dragging started inside "Continue Playing" (_dragStartOffsetY > 2.0) -> clamp at 0
+    // Case 1: Dragging started inside "Continue Playing" (_dragStartOffsetY > 2.0) -> clamp deceleration cleanly at 0
     if (_dragStartOffsetY > 2.0) {
         if (targetContentOffset->y < 0.0) {
             targetContentOffset->y = 0.0;
@@ -2474,15 +2549,21 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 
 - (void)handleAutoplayPillTap {
     _autoplayEnabled = !_autoplayEnabled;
-    [NSUserDefaults.standardUserDefaults setBool:_autoplayEnabled forKey:SGRKeyQueueAutoplay];
+    SGSetEnabled(SGRKeyQueueAutoplay, _autoplayEnabled);
+    SPTPreferences *prefs = SGSpotifyPreferences();
+    if (prefs && [prefs respondsToSelector:@selector(setAutoplay:)]) {
+        @try {
+            [prefs setAutoplay:_autoplayEnabled];
+        } @catch (__unused NSException *e) {}
+    }
     [self updatePlaybackPillsWithState:SGPlayerState()];
 }
 
 - (void)handleTransitionsPillTap {
     _transitionsEnabled = !_transitionsEnabled;
-    [NSUserDefaults.standardUserDefaults setBool:_transitionsEnabled forKey:SGRKeyQueueTransitions];
+    SGSetEnabled(SGRKeyQueueTransitions, _transitionsEnabled);
     if (SGAutoMixAccountAllows()) {
-        [NSUserDefaults.standardUserDefaults setBool:_transitionsEnabled forKey:SGKeyAutoMix];
+        SGSetEnabled(SGKeyAutoMix, _transitionsEnabled);
         SGAutoMixApply(_transitionsEnabled);
     }
     [self updatePlaybackPillsWithState:SGPlayerState()];
@@ -2494,7 +2575,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 
 - (void)handleClearHistoryTap {
     if (_historyItems.count == 0) return;
-    _historyUnlocked = NO;
+    _clampAtZeroOnDragOrDecel = NO;
     [[SGRQueueSession shared] clearHistory];
     [UIView animateWithDuration:0.28 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
         self->_scrollView.contentInset = UIEdgeInsetsMake(0.0, 0.0, 36.0, 0.0);

@@ -19,8 +19,8 @@
 // Updates the queue with a fresh state report.
 - (void)updateWithState:(SPTPlayerState *)state;
 
-// Prepares the queue right before an open transition: docks scrollY = 0 with History locked closed
-// and ensures track rows & layout are warm with zero blank frame.
+// Prepares the queue right before an open transition: docks scrollY = 0 with History hidden above
+// the top clip plane and ensures track rows & layout are warm with zero blank frame.
 - (void)prepareForOpenTransition;
 
 // Hides the inline 62x62 Now Playing thumbnail while the shared-element 310x310 <-> 62x62 cover is in flight.
