@@ -1,6 +1,8 @@
 // Apple Music style inline queue view for the redesigned player.
-// Shows upcoming tracks ("Continue Playing" / "Playing Next") with Apple Music pill buttons,
-// explicit badges, reorder handles, artwork thumbnails, and dynamic context headers.
+// Shows history (pull-down), currently playing track with star & more options,
+// 4 Apple Music pill buttons (pinned on scroll), and upcoming tracks ("Continue Playing")
+// with explicit badges, artwork thumbnails, grabber handles, swipe-to-delete,
+// drag-to-reorder, and 1:1 Apple Music context menus.
 
 #import "SGRQueueView.h"
 #import <objc/runtime.h>
@@ -10,19 +12,31 @@
 #import "Shared/LocalFiles/LocalFiles.h"
 #import "Shared/Player/PlayerState.h"
 #import "Shared/AutoMix/AutoMix.h"
+#import "Shared/HeadGestures/HeadGestures.h"
 #import "Player.h"
 
 static const CGFloat kSideMargin = 20.0;
 static const CGFloat kThumbSide = 42.0;
+static const CGFloat kCurrentThumbSide = 52.0;
 static const CGFloat kRowHeight = 56.0;
+static const CGFloat kCurrentRowHeight = 68.0;
 static const CGFloat kPillsHeight = 36.0;
-static const CGFloat kHeaderHeight = 48.0;
+static const CGFloat kQueueHeaderHeight = 104.0;
+static const CGFloat kHistoryHeaderHeight = 44.0;
 
 #define SGKeyQueueAutoplay @"spotifyglass.queue.autoplay"
+
+typedef NS_ENUM(NSInteger, SGRQueueSection) {
+    SGRQueueSectionHistory = 0,
+    SGRQueueSectionCurrent = 1,
+    SGRQueueSectionQueue   = 2,
+    SGRQueueSectionCount   = 3,
+};
 
 static NSCache<NSString *, UIImage *> *sg_queueImageCache;
 
 static NSURL *queueArtworkURLForTrack(SPTPlayerTrack *track) {
+    if (!track) return nil;
     NSDictionary *metadata = [track respondsToSelector:@selector(metadata)] ? track.metadata : nil;
     if (![metadata isKindOfClass:NSDictionary.class]) return nil;
     for (NSString *field in @[@"image_small_url", @"image_url", @"image_large_url", @"image_xlarge_url"]) {
@@ -40,12 +54,54 @@ static NSURL *queueArtworkURLForTrack(SPTPlayerTrack *track) {
 }
 
 static BOOL trackIsExplicit(SPTPlayerTrack *track) {
+    if (!track) return NO;
     NSDictionary *m = [track respondsToSelector:@selector(metadata)] ? track.metadata : nil;
     if (![m isKindOfClass:NSDictionary.class]) return NO;
     id val = m[@"is_explicit"] ?: m[@"explicit"];
     if ([val respondsToSelector:@selector(boolValue)]) return [val boolValue];
     if ([val isKindOfClass:NSString.class]) return [val isEqualToString:@"true"] || [val isEqualToString:@"1"];
     return NO;
+}
+
+static void loadArtworkForTrack(SPTPlayerTrack *track, UIImageView *imageView, void (^done)(UIImage *)) {
+    if (!track) return;
+    id uri = track.URI;
+    NSString *uriString = [uri isKindOfClass:NSURL.class] ? [(NSURL *)uri absoluteString] : ([uri isKindOfClass:NSString.class] ? uri : nil);
+    UIImage *cached = uriString ? [sg_queueImageCache objectForKey:uriString] : nil;
+    if (cached) {
+        imageView.image = cached;
+        if (done) done(cached);
+        return;
+    }
+
+    UIImageSymbolConfiguration *noteConfig = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightRegular];
+    UIImage *noteSymbol = [UIImage systemImageNamed:@"music.note" withConfiguration:noteConfig];
+    imageView.image = [noteSymbol imageWithTintColor:SGRTertiary() renderingMode:UIImageRenderingModeAlwaysOriginal];
+
+    NSURL *url = queueArtworkURLForTrack(track);
+    if (!url) return;
+
+    __weak UIImageView *weakView = imageView;
+    NSString *expectedURI = uriString;
+    [[NSURLSession.sharedSession dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        if (!data.length || error) return;
+        UIImage *downloaded = [UIImage imageWithData:data];
+        if (!downloaded) return;
+        if (expectedURI) [sg_queueImageCache setObject:downloaded forKey:expectedURI];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIImageView *strongView = weakView;
+            if (strongView) {
+                if (SGRReduceMotion()) {
+                    strongView.image = downloaded;
+                } else {
+                    [UIView transitionWithView:strongView duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+                        strongView.image = downloaded;
+                    } completion:nil];
+                }
+            }
+            if (done) done(downloaded);
+        });
+    }] resume];
 }
 
 #pragma mark - Pill Button
@@ -120,7 +176,169 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
 
 @end
 
-#pragma mark - Track Cell
+#pragma mark - Current Track Cell
+
+@interface SGRQueueCurrentTrackCell : UITableViewCell
+@property (nonatomic, readonly) UIImageView *coverImageView;
+@property (nonatomic, readonly) UILabel *titleLabel;
+@property (nonatomic, readonly) UIView *explicitBadge;
+@property (nonatomic, readonly) UILabel *artistLabel;
+@property (nonatomic, readonly) UIButton *starButton;
+@property (nonatomic, readonly) UIButton *moreButton;
+@property (nonatomic, copy) NSString *representedTrackURI;
+@property (nonatomic, copy) void (^onStarTap)(void);
+@property (nonatomic, copy) void (^onMoreTap)(UIButton *sender);
+- (void)configureWithTrack:(SPTPlayerTrack *)track;
+- (void)setStarred:(BOOL)starred animated:(BOOL)animated;
+@end
+
+@implementation SGRQueueCurrentTrackCell {
+    UIImageView *_coverImageView;
+    UILabel *_titleLabel;
+    UIView *_explicitBadge;
+    UILabel *_explicitLabel;
+    UILabel *_artistLabel;
+    UIButton *_starButton;
+    UIButton *_moreButton;
+    BOOL _isStarred;
+}
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style reuseIdentifier:(NSString *)reuseIdentifier {
+    if (!(self = [super initWithStyle:style reuseIdentifier:reuseIdentifier])) return nil;
+    self.backgroundColor = UIColor.clearColor;
+    self.selectionStyle = UITableViewCellSelectionStyleNone;
+
+    _coverImageView = [UIImageView new];
+    _coverImageView.contentMode = UIViewContentModeScaleAspectFill;
+    _coverImageView.clipsToBounds = YES;
+    _coverImageView.layer.cornerRadius = 6.0;
+    _coverImageView.layer.cornerCurve = kCACornerCurveContinuous;
+    _coverImageView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
+    [self.contentView addSubview:_coverImageView];
+
+    _titleLabel = [UILabel new];
+    _titleLabel.font = [UIFont systemFontOfSize:16.0 weight:UIFontWeightBold];
+    _titleLabel.textColor = SGRPrimary();
+    _titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.contentView addSubview:_titleLabel];
+
+    _explicitBadge = [UIView new];
+    _explicitBadge.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.18];
+    _explicitBadge.layer.cornerRadius = 2.5;
+    _explicitBadge.layer.cornerCurve = kCACornerCurveContinuous;
+    _explicitBadge.clipsToBounds = YES;
+    _explicitBadge.hidden = YES;
+    [self.contentView addSubview:_explicitBadge];
+
+    _explicitLabel = [UILabel new];
+    _explicitLabel.text = @"E";
+    _explicitLabel.font = [UIFont boldSystemFontOfSize:8.5];
+    _explicitLabel.textColor = SGRSecondary();
+    _explicitLabel.textAlignment = NSTextAlignmentCenter;
+    [_explicitBadge addSubview:_explicitLabel];
+
+    _artistLabel = [UILabel new];
+    _artistLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightRegular];
+    _artistLabel.textColor = SGRSecondary();
+    _artistLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    [self.contentView addSubview:_artistLabel];
+
+    UIImageSymbolConfiguration *btnConfig = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightRegular];
+
+    _starButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_starButton setImage:[UIImage systemImageNamed:@"star" withConfiguration:btnConfig] forState:UIControlStateNormal];
+    _starButton.tintColor = [UIColor colorWithWhite:1.0 alpha:0.45];
+    [_starButton addTarget:self action:@selector(starTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.contentView addSubview:_starButton];
+
+    _moreButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_moreButton setImage:[UIImage systemImageNamed:@"ellipsis" withConfiguration:btnConfig] forState:UIControlStateNormal];
+    _moreButton.tintColor = [UIColor colorWithWhite:1.0 alpha:0.45];
+    [_moreButton addTarget:self action:@selector(moreTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.contentView addSubview:_moreButton];
+
+    return self;
+}
+
+- (void)starTapped {
+    [self setStarred:!_isStarred animated:YES];
+    if (self.onStarTap) self.onStarTap();
+}
+
+- (void)moreTapped {
+    if (self.onMoreTap) self.onMoreTap(_moreButton);
+}
+
+- (void)setStarred:(BOOL)starred animated:(BOOL)animated {
+    _isStarred = starred;
+    UIImageSymbolConfiguration *btnConfig = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightRegular];
+    UIImage *img = [UIImage systemImageNamed:starred ? @"star.fill" : @"star" withConfiguration:btnConfig];
+    [_starButton setImage:img forState:UIControlStateNormal];
+    _starButton.tintColor = starred ? [UIColor colorWithRed:1.0 green:0.8 blue:0.0 alpha:1.0] : [UIColor colorWithWhite:1.0 alpha:0.45];
+
+    if (animated && !SGRReduceMotion()) {
+        _starButton.transform = CGAffineTransformMakeScale(1.3, 1.3);
+        [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.5 initialSpringVelocity:0.8 options:0 animations:^{
+            self->_starButton.transform = CGAffineTransformIdentity;
+        } completion:nil];
+    }
+}
+
+- (void)configureWithTrack:(SPTPlayerTrack *)track {
+    _titleLabel.text = track.trackTitle ?: @"Unknown Title";
+    _artistLabel.text = track.artistName ?: @"Unknown Artist";
+
+    BOOL isExp = trackIsExplicit(track);
+    _explicitBadge.hidden = !isExp;
+
+    id uri = track.URI;
+    NSString *uriString = [uri isKindOfClass:NSURL.class] ? [(NSURL *)uri absoluteString] : ([uri isKindOfClass:NSString.class] ? uri : nil);
+    self.representedTrackURI = uriString;
+
+    loadArtworkForTrack(track, _coverImageView, nil);
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = self.contentView.bounds.size.width;
+    CGFloat h = self.contentView.bounds.size.height;
+
+    CGFloat thumbY = round((h - kCurrentThumbSide) / 2.0);
+    _coverImageView.frame = CGRectMake(kSideMargin, thumbY, kCurrentThumbSide, kCurrentThumbSide);
+
+    CGFloat btnSide = 36.0;
+    CGFloat btnY = round((h - btnSide) / 2.0);
+    _moreButton.frame = CGRectMake(w - kSideMargin - btnSide, btnY, btnSide, btnSide);
+    _starButton.frame = CGRectMake(CGRectGetMinX(_moreButton.frame) - btnSide - 6.0, btnY, btnSide, btnSide);
+
+    CGFloat textX = CGRectGetMaxX(_coverImageView.frame) + 12.0;
+    CGFloat maxTextW = MAX(0, CGRectGetMinX(_starButton.frame) - textX - 8.0);
+
+    CGFloat badgeW = 14.0, badgeH = 14.0, badgeGap = 5.0;
+    BOOL isExp = !_explicitBadge.hidden;
+    CGFloat titleAvailableW = isExp ? MAX(0, maxTextW - badgeW - badgeGap) : maxTextW;
+
+    CGSize titleSize = [_titleLabel sizeThatFits:CGSizeMake(titleAvailableW, CGFLOAT_MAX)];
+    CGFloat titleW = MIN(titleSize.width, titleAvailableW);
+
+    CGSize artistSize = [_artistLabel sizeThatFits:CGSizeMake(maxTextW, CGFLOAT_MAX)];
+    CGFloat totalTextH = titleSize.height + artistSize.height + 3.0;
+    CGFloat textY = round((h - totalTextH) / 2.0);
+
+    _titleLabel.frame = CGRectMake(textX, textY, titleW, titleSize.height);
+
+    if (isExp) {
+        CGFloat badgeY = textY + round((titleSize.height - badgeH) / 2.0);
+        _explicitBadge.frame = CGRectMake(CGRectGetMaxX(_titleLabel.frame) + badgeGap, badgeY, badgeW, badgeH);
+        _explicitLabel.frame = _explicitBadge.bounds;
+    }
+
+    _artistLabel.frame = CGRectMake(textX, CGRectGetMaxY(_titleLabel.frame) + 3.0, maxTextW, artistSize.height);
+}
+
+@end
+
+#pragma mark - Track Cell (History & Queue)
 
 @interface SGRQueueTrackCell : UITableViewCell
 @property (nonatomic, readonly) UIImageView *coverImageView;
@@ -128,8 +346,9 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
 @property (nonatomic, readonly) UIView *explicitBadge;
 @property (nonatomic, readonly) UILabel *artistLabel;
 @property (nonatomic, readonly) UIImageView *reorderImageView;
+@property (nonatomic, assign) BOOL isHistoryRow;
 @property (nonatomic, copy) NSString *representedTrackURI;
-- (void)configureWithTrack:(SPTPlayerTrack *)track;
+- (void)configureWithTrack:(SPTPlayerTrack *)track isHistory:(BOOL)isHistory;
 @end
 
 @implementation SGRQueueTrackCell {
@@ -147,10 +366,10 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
     self.backgroundColor = UIColor.clearColor;
     self.selectionStyle = UITableViewCellSelectionStyleNone;
 
-    _coverImageView = [[UIImageView alloc] initWithFrame:CGRectZero];
+    _coverImageView = [UIImageView new];
     _coverImageView.contentMode = UIViewContentModeScaleAspectFill;
     _coverImageView.clipsToBounds = YES;
-    _coverImageView.layer.cornerRadius = 6.0;
+    _coverImageView.layer.cornerRadius = 5.0;
     _coverImageView.layer.cornerCurve = kCACornerCurveContinuous;
     _coverImageView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
     [self.contentView addSubview:_coverImageView];
@@ -196,7 +415,10 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
     return self;
 }
 
-- (void)configureWithTrack:(SPTPlayerTrack *)track {
+- (void)configureWithTrack:(SPTPlayerTrack *)track isHistory:(BOOL)isHistory {
+    _isHistoryRow = isHistory;
+    _reorderImageView.hidden = isHistory;
+
     _titleLabel.text = track.trackTitle ?: @"Unknown Title";
     _artistLabel.text = track.artistName ?: @"Unknown Artist";
 
@@ -207,38 +429,7 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
     NSString *uriString = [uri isKindOfClass:NSURL.class] ? [(NSURL *)uri absoluteString] : ([uri isKindOfClass:NSString.class] ? uri : nil);
     self.representedTrackURI = uriString;
 
-    UIImage *cached = uriString ? [sg_queueImageCache objectForKey:uriString] : nil;
-    if (cached) {
-        _coverImageView.image = cached;
-    } else {
-        UIImageSymbolConfiguration *noteConfig = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightRegular];
-        UIImage *noteSymbol = [UIImage systemImageNamed:@"music.note" withConfiguration:noteConfig];
-        _coverImageView.image = [noteSymbol imageWithTintColor:SGRTertiary() renderingMode:UIImageRenderingModeAlwaysOriginal];
-
-        NSURL *url = queueArtworkURLForTrack(track);
-        if (url) {
-            __weak SGRQueueTrackCell *weakCell = self;
-            NSString *expectedURI = uriString;
-            [[NSURLSession.sharedSession dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-                if (!data.length || error) return;
-                UIImage *downloaded = [UIImage imageWithData:data];
-                if (!downloaded) return;
-                if (expectedURI) [sg_queueImageCache setObject:downloaded forKey:expectedURI];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    SGRQueueTrackCell *strongCell = weakCell;
-                    if (strongCell && [strongCell.representedTrackURI isEqualToString:expectedURI]) {
-                        if (SGRReduceMotion()) {
-                            strongCell.coverImageView.image = downloaded;
-                        } else {
-                            [UIView transitionWithView:strongCell.coverImageView duration:0.2 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
-                                strongCell.coverImageView.image = downloaded;
-                            } completion:nil];
-                        }
-                    }
-                });
-            }] resume];
-        }
-    }
+    loadArtworkForTrack(track, _coverImageView, nil);
 }
 
 - (void)layoutSubviews {
@@ -253,7 +444,8 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
     _reorderImageView.frame = CGRectMake(w - kSideMargin - reorderW, round((h - reorderH) / 2.0), reorderW, reorderH);
 
     CGFloat textX = CGRectGetMaxX(_coverImageView.frame) + 12.0;
-    CGFloat maxTextW = MAX(0, CGRectGetMinX(_reorderImageView.frame) - textX - 10.0);
+    CGFloat rightBoundary = _isHistoryRow ? (w - kSideMargin) : CGRectGetMinX(_reorderImageView.frame) - 10.0;
+    CGFloat maxTextW = MAX(0, rightBoundary - textX);
 
     CGFloat badgeW = 14.0, badgeH = 14.0, badgeGap = 5.0;
     BOOL isExp = !_explicitBadge.hidden;
@@ -296,23 +488,35 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
 
 #pragma mark - SGRQueueView
 
-@interface SGRQueueView () <UITableViewDataSource, UITableViewDelegate>
+@interface SGRQueueView () <UITableViewDataSource, UITableViewDelegate, UITableViewDragDelegate, UITableViewDropDelegate>
 @end
 
 @implementation SGRQueueView {
+    UIView *_topGrabber;
+    UITableView *_tableView;
+    UILabel *_emptyLabel;
+
+    // Header views
+    UIView *_historyHeaderView;
+    UIButton *_historyClearButton;
+
+    UIView *_queueHeaderView;
+    UIVisualEffectView *_queueHeaderBlur;
     UIView *_pillsContainer;
     SGRQueuePillButton *_shufflePill;
     SGRQueuePillButton *_repeatPill;
     SGRQueuePillButton *_autoplayPill;
     SGRQueuePillButton *_automixPill;
+    UILabel *_queueTitleLabel;
+    UILabel *_queueSubtitleLabel;
 
-    UIView *_headerView;
-    UILabel *_titleLabel;
-    UILabel *_subtitleLabel;
-
-    UITableView *_tableView;
-    UILabel *_emptyLabel;
-    NSArray<SPTPlayerTrack *> *_tracks;
+    // Data models
+    SPTPlayerTrack *_currentTrack;
+    NSArray<SPTPlayerTrack *> *_historyTracks;
+    NSArray<SPTPlayerTrack *> *_futureTracks;
+    BOOL _historyCleared;
+    BOOL _hasScrolledToCurrent;
+    NSString *_lastTrackURI;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -323,11 +527,15 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         sg_queueImageCache = [NSCache new];
-        sg_queueImageCache.countLimit = 150;
+        sg_queueImageCache.countLimit = 200;
     });
 
-    [self buildPills];
-    [self buildHeader];
+    _historyTracks = @[];
+    _futureTracks = @[];
+
+    [self buildTopGrabber];
+    [self buildHistoryHeader];
+    [self buildQueueHeader];
     [self buildTableView];
 
     SGAddPlayerStateObserver(self);
@@ -335,14 +543,56 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
     return self;
 }
 
-- (void)dealloc {
-    // Weak observer table handles cleanup automatically
+- (void)buildTopGrabber {
+    _topGrabber = [UIView new];
+    _topGrabber.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.32];
+    _topGrabber.layer.cornerRadius = 2.5;
+    _topGrabber.layer.cornerCurve = kCACornerCurveContinuous;
+    [self addSubview:_topGrabber];
 }
 
-- (void)buildPills {
+- (void)buildHistoryHeader {
+    _historyHeaderView = [UIView new];
+    _historyHeaderView.backgroundColor = UIColor.clearColor;
+
+    UILabel *histTitle = [UILabel new];
+    histTitle.text = @"History";
+    histTitle.font = [UIFont systemFontOfSize:20.0 weight:UIFontWeightBold];
+    histTitle.textColor = SGRPrimary();
+    histTitle.tag = 1001;
+    [_historyHeaderView addSubview:histTitle];
+
+    _historyClearButton = [UIButton buttonWithType:UIButtonTypeCustom];
+    [_historyClearButton setTitle:@"Clear" forState:UIControlStateNormal];
+    [_historyClearButton setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.5] forState:UIControlStateNormal];
+    [_historyClearButton setTitleColor:SGRPrimary() forState:UIControlStateHighlighted];
+    _historyClearButton.titleLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightRegular];
+    [_historyClearButton addTarget:self action:@selector(clearHistoryTapped) forControlEvents:UIControlEventTouchUpInside];
+    [_historyHeaderView addSubview:_historyClearButton];
+}
+
+- (void)clearHistoryTapped {
+    _historyCleared = YES;
+    _historyTracks = @[];
+    if (!SGRReduceMotion()) {
+        [_tableView reloadSections:[NSIndexSet indexSetWithIndex:SGRQueueSectionHistory] withRowAnimation:UITableViewRowAnimationFade];
+    } else {
+        [_tableView reloadData];
+    }
+}
+
+- (void)buildQueueHeader {
+    _queueHeaderView = [UIView new];
+    _queueHeaderView.backgroundColor = UIColor.clearColor;
+
+    UIBlurEffect *blur = [UIBlurEffect effectWithStyle:UIBlurEffectStyleDark];
+    _queueHeaderBlur = [[UIVisualEffectView alloc] initWithEffect:blur];
+    _queueHeaderBlur.alpha = 0.94;
+    [_queueHeaderView addSubview:_queueHeaderBlur];
+
     _pillsContainer = [UIView new];
     _pillsContainer.backgroundColor = UIColor.clearColor;
-    [self addSubview:_pillsContainer];
+    [_queueHeaderView addSubview:_pillsContainer];
 
     __weak typeof(self) weakSelf = self;
 
@@ -401,23 +651,17 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
         [weakSelf->_automixPill setIsActive:nextVal];
     };
     [_pillsContainer addSubview:_automixPill];
-}
 
-- (void)buildHeader {
-    _headerView = [UIView new];
-    _headerView.backgroundColor = UIColor.clearColor;
-    [self addSubview:_headerView];
+    _queueTitleLabel = [UILabel new];
+    _queueTitleLabel.text = @"Continue Playing";
+    _queueTitleLabel.font = [UIFont systemFontOfSize:20.0 weight:UIFontWeightBold];
+    _queueTitleLabel.textColor = SGRPrimary();
+    [_queueHeaderView addSubview:_queueTitleLabel];
 
-    _titleLabel = [UILabel new];
-    _titleLabel.text = @"Continue Playing";
-    _titleLabel.font = [UIFont systemFontOfSize:20.0 weight:UIFontWeightBold];
-    _titleLabel.textColor = SGRPrimary();
-    [_headerView addSubview:_titleLabel];
-
-    _subtitleLabel = [UILabel new];
-    _subtitleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightRegular];
-    _subtitleLabel.textColor = SGRSecondary();
-    [_headerView addSubview:_subtitleLabel];
+    _queueSubtitleLabel = [UILabel new];
+    _queueSubtitleLabel.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightRegular];
+    _queueSubtitleLabel.textColor = SGRSecondary();
+    [_queueHeaderView addSubview:_queueSubtitleLabel];
 }
 
 - (void)buildTableView {
@@ -426,11 +670,15 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
     _tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     _tableView.dataSource = self;
     _tableView.delegate = self;
-    _tableView.rowHeight = kRowHeight;
+    _tableView.dragDelegate = self;
+    _tableView.dropDelegate = self;
+    _tableView.dragInteractionEnabled = YES;
     _tableView.showsVerticalScrollIndicator = YES;
     _tableView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
     _tableView.contentInset = UIEdgeInsetsMake(0, 0, 110.0, 0);
     _tableView.scrollIndicatorInsets = UIEdgeInsetsMake(0, 0, 110.0, 0);
+
+    [_tableView registerClass:SGRQueueCurrentTrackCell.class forCellReuseIdentifier:@"CurrentTrackCell"];
     [_tableView registerClass:SGRQueueTrackCell.class forCellReuseIdentifier:@"TrackCell"];
     [self addSubview:_tableView];
 
@@ -449,9 +697,26 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
     CGFloat h = self.bounds.size.height;
     if (w < 1 || h < 1) return;
 
-    // Pills row
+    // Top grabber
+    CGFloat grabberW = 36.0, grabberH = 5.0;
+    _topGrabber.frame = CGRectMake(round((w - grabberW) / 2.0), 8.0, grabberW, grabberH);
+
+    // Table view
+    CGFloat tableY = 16.0;
+    _tableView.frame = CGRectMake(0, tableY, w, MAX(0, h - tableY));
+    _emptyLabel.frame = _tableView.frame;
+
+    // History header layout
+    CGFloat histTitleW = 140.0;
+    UIView *histTitle = [_historyHeaderView viewWithTag:1001];
+    histTitle.frame = CGRectMake(kSideMargin, 12.0, histTitleW, 26.0);
+    _historyClearButton.frame = CGRectMake(w - kSideMargin - 60.0, 12.0, 60.0, 26.0);
+
+    // Queue header layout
+    _queueHeaderBlur.frame = CGRectMake(0, 0, w, kQueueHeaderHeight);
+
     CGFloat pillsW = w - (2 * kSideMargin);
-    _pillsContainer.frame = CGRectMake(kSideMargin, 2.0, pillsW, kPillsHeight);
+    _pillsContainer.frame = CGRectMake(kSideMargin, 6.0, pillsW, kPillsHeight);
     CGFloat gap = 8.0;
     CGFloat pillW = floor((pillsW - (3.0 * gap)) / 4.0);
     _shufflePill.frame = CGRectMake(0, 0, pillW, kPillsHeight);
@@ -459,16 +724,9 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
     _autoplayPill.frame = CGRectMake(2.0 * (pillW + gap), 0, pillW, kPillsHeight);
     _automixPill.frame = CGRectMake(3.0 * (pillW + gap), 0, pillsW - (3.0 * (pillW + gap)), kPillsHeight);
 
-    // Header row
-    CGFloat headerY = CGRectGetMaxY(_pillsContainer.frame) + 12.0;
-    _headerView.frame = CGRectMake(kSideMargin, headerY, pillsW, kHeaderHeight);
-    _titleLabel.frame = CGRectMake(0, 0, pillsW, 26.0);
-    _subtitleLabel.frame = CGRectMake(0, 26.0, pillsW, 20.0);
-
-    // Table view
-    CGFloat tableY = CGRectGetMaxY(_headerView.frame) + 6.0;
-    _tableView.frame = CGRectMake(0, tableY, w, MAX(0, h - tableY));
-    _emptyLabel.frame = _tableView.frame;
+    CGFloat titleY = CGRectGetMaxY(_pillsContainer.frame) + 10.0;
+    _queueTitleLabel.frame = CGRectMake(kSideMargin, titleY, pillsW, 26.0);
+    _queueSubtitleLabel.frame = CGRectMake(kSideMargin, CGRectGetMaxY(_queueTitleLabel.frame) + 1.0, pillsW, 20.0);
 }
 
 - (void)refreshPillStatesWithState:(SPTPlayerState *)state {
@@ -495,41 +753,74 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
 
     [self refreshPillStatesWithState:state];
 
-    // Context / Album subtitle
-    NSDictionary *metadata = [state.track respondsToSelector:@selector(metadata)] ? state.track.metadata : nil;
-    NSString *album = [metadata isKindOfClass:NSDictionary.class] ? metadata[@"album_title"] : nil;
-    if (album.length) {
-        _subtitleLabel.text = [NSString stringWithFormat:@"From %@", album];
-        _subtitleLabel.hidden = NO;
-    } else {
-        _subtitleLabel.text = @"";
-        _subtitleLabel.hidden = YES;
+    // Current playing track
+    _currentTrack = [state respondsToSelector:@selector(track)] ? state.track : nil;
+    NSString *currentURI = SGURIString(_currentTrack.URI);
+    if (currentURI.length && ![currentURI isEqualToString:_lastTrackURI]) {
+        _lastTrackURI = currentURI;
+        _historyCleared = NO;
+        _hasScrolledToCurrent = NO;
     }
 
+    // Context / Album subtitle
+    NSDictionary *metadata = [_currentTrack respondsToSelector:@selector(metadata)] ? _currentTrack.metadata : nil;
+    NSString *album = [metadata isKindOfClass:NSDictionary.class] ? metadata[@"album_title"] : nil;
+    if (album.length) {
+        _queueSubtitleLabel.text = [NSString stringWithFormat:@"From %@", album];
+        _queueSubtitleLabel.hidden = NO;
+    } else {
+        _queueSubtitleLabel.text = @"";
+        _queueSubtitleLabel.hidden = YES;
+    }
+
+    // Future tracks
     id future = [state respondsToSelector:@selector(future)] ? state.future : nil;
-    NSMutableArray<SPTPlayerTrack *> *list = [NSMutableArray array];
+    NSMutableArray<SPTPlayerTrack *> *futureList = [NSMutableArray array];
     Class trackClass = objc_getClass("SPTPlayerTrack");
     for (id item in [future isKindOfClass:NSArray.class] ? future : @[]) {
         if (trackClass && ![item isKindOfClass:trackClass]) continue;
         SPTPlayerTrack *track = (SPTPlayerTrack *)item;
-        if (track.trackTitle.length) [list addObject:track];
+        if (track.trackTitle.length) [futureList addObject:track];
     }
-    _tracks = [list copy];
+    _futureTracks = [futureList copy];
 
-    NSUInteger count = _tracks.count;
-    _emptyLabel.hidden = (count > 0);
-    _tableView.hidden = (count == 0);
+    // History tracks (from state.reverse)
+    if (!_historyCleared) {
+        id reverse = [state respondsToSelector:@selector(reverse)] ? state.reverse : nil;
+        NSMutableArray<SPTPlayerTrack *> *histList = [NSMutableArray array];
+        for (id item in [reverse isKindOfClass:NSArray.class] ? reverse : @[]) {
+            if (trackClass && ![item isKindOfClass:trackClass]) continue;
+            SPTPlayerTrack *track = (SPTPlayerTrack *)item;
+            if (track.trackTitle.length) [histList addObject:track];
+        }
+        // reverse has nearest first; Apple Music displays oldest at top and nearest right above current
+        _historyTracks = [[histList reverseObjectEnumerator] allObjects];
+    } else {
+        _historyTracks = @[];
+    }
+
+    _emptyLabel.hidden = (_futureTracks.count > 0 || _currentTrack != nil);
 
     [_tableView reloadData];
 
-    // If initial launch had no future tracks loaded yet, retry shortly
-    if (count == 0) {
-        __weak typeof(self) weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (weakSelf && weakSelf->_tracks.count == 0) [weakSelf reloadTracks];
+    // Scroll to Current Track initially so History is tucked above it
+    if (!_hasScrolledToCurrent && _historyTracks.count > 0) {
+        _hasScrolledToCurrent = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_historyTracks.count > 0 && self->_currentTrack) {
+                [self->_tableView scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:0 inSection:SGRQueueSectionCurrent] atScrollPosition:UITableViewScrollPositionTop animated:NO];
+            }
         });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.65 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (weakSelf && weakSelf->_tracks.count == 0) [weakSelf reloadTracks];
+    }
+
+    // Retry if future tracks not yet loaded on initial cold launch
+    if (_futureTracks.count == 0) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (weakSelf && weakSelf->_futureTracks.count == 0) [weakSelf reloadTracks];
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (weakSelf && weakSelf->_futureTracks.count == 0) [weakSelf reloadTracks];
         });
     }
 }
@@ -556,46 +847,316 @@ static BOOL trackIsExplicit(SPTPlayerTrack *track) {
     [self updateWithState:state];
 }
 
+#pragma mark - Track Lookup
+
+- (SPTPlayerTrack *)trackForIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == SGRQueueSectionHistory && indexPath.row < (NSInteger)_historyTracks.count) {
+        return _historyTracks[indexPath.row];
+    }
+    if (indexPath.section == SGRQueueSectionCurrent) {
+        return _currentTrack;
+    }
+    if (indexPath.section == SGRQueueSectionQueue && indexPath.row < (NSInteger)_futureTracks.count) {
+        return _futureTracks[indexPath.row];
+    }
+    return nil;
+}
+
 #pragma mark - UITableViewDataSource
 
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return SGRQueueSectionCount;
+}
+
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return _tracks.count;
+    if (section == SGRQueueSectionHistory) {
+        return _historyCleared ? 0 : _historyTracks.count;
+    }
+    if (section == SGRQueueSectionCurrent) {
+        return _currentTrack ? 1 : 0;
+    }
+    if (section == SGRQueueSectionQueue) {
+        return _futureTracks.count;
+    }
+    return 0;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    SGRQueueTrackCell *cell = [tableView dequeueReusableCellWithIdentifier:@"TrackCell" forIndexPath:indexPath];
-    if (indexPath.row >= (NSInteger)_tracks.count) return cell;
+    if (indexPath.section == SGRQueueSectionCurrent) {
+        SGRQueueCurrentTrackCell *cell = [tableView dequeueReusableCellWithIdentifier:@"CurrentTrackCell" forIndexPath:indexPath];
+        [cell configureWithTrack:_currentTrack];
+        __weak typeof(self) weakSelf = self;
+        cell.onStarTap = ^{
+            SGLikePlayingTrack();
+        };
+        cell.onMoreTap = ^(UIButton *sender) {
+            // Trigger context menu
+            if (@available(iOS 14.0, *)) {
+                // Presented via contextMenuConfiguration
+            }
+        };
+        return cell;
+    }
 
-    SPTPlayerTrack *track = _tracks[indexPath.row];
-    [cell configureWithTrack:track];
+    SGRQueueTrackCell *cell = [tableView dequeueReusableCellWithIdentifier:@"TrackCell" forIndexPath:indexPath];
+    SPTPlayerTrack *track = [self trackForIndexPath:indexPath];
+    [cell configureWithTrack:track isHistory:(indexPath.section == SGRQueueSectionHistory)];
     return cell;
 }
 
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == SGRQueueSectionCurrent) return kCurrentRowHeight;
+    return kRowHeight;
+}
+
+- (CGFloat)tableView:(UITableView *)tableView heightForHeaderInSection:(NSInteger)section {
+    if (section == SGRQueueSectionHistory) {
+        return (_historyTracks.count > 0 && !_historyCleared) ? kHistoryHeaderHeight : 0.01;
+    }
+    if (section == SGRQueueSectionCurrent) {
+        return 0.01;
+    }
+    if (section == SGRQueueSectionQueue) {
+        return kQueueHeaderHeight;
+    }
+    return 0.01;
+}
+
+- (UIView *)tableView:(UITableView *)tableView viewForHeaderInSection:(NSInteger)section {
+    if (section == SGRQueueSectionHistory) {
+        return (_historyTracks.count > 0 && !_historyCleared) ? _historyHeaderView : nil;
+    }
+    if (section == SGRQueueSectionQueue) {
+        return _queueHeaderView;
+    }
+    return nil;
+}
+
+#pragma mark - Swipe to Delete (1:1 Apple Music)
+
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section != SGRQueueSectionQueue && indexPath.section != SGRQueueSectionHistory) return nil;
+
+    __weak typeof(self) weakSelf = self;
+    UIContextualAction *deleteAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive title:nil handler:^(UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+        [weakSelf deleteRowAtIndexPath:indexPath];
+        completionHandler(YES);
+    }];
+
+    UIImageSymbolConfiguration *symConfig = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightMedium];
+    deleteAction.image = [UIImage systemImageNamed:@"minus.circle.fill" withConfiguration:symConfig];
+    deleteAction.backgroundColor = [UIColor colorWithRed:0.95 green:0.25 blue:0.28 alpha:1.0];
+
+    UISwipeActionsConfiguration *config = [UISwipeActionsConfiguration configurationWithActions:@[deleteAction]];
+    config.performsFirstActionWithFullSwipe = YES;
+    return config;
+}
+
+- (void)deleteRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section == SGRQueueSectionQueue) {
+        if (indexPath.row >= (NSInteger)_futureTracks.count) return;
+        NSMutableArray *mut = [_futureTracks mutableCopy];
+        [mut removeObjectAtIndex:indexPath.row];
+        _futureTracks = [mut copy];
+        [_tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationAutomatic];
+        if (_futureTracks.count == 0) _emptyLabel.hidden = NO;
+    } else if (indexPath.section == SGRQueueSectionHistory) {
+        if (indexPath.row >= (NSInteger)_historyTracks.count) return;
+        NSMutableArray *mut = [_historyTracks mutableCopy];
+        [mut removeObjectAtIndex:indexPath.row];
+        _historyTracks = [mut copy];
+        [_tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationAutomatic];
+    }
+}
+
+#pragma mark - Reordering (Drag and Drop & Move)
+
 - (BOOL)tableView:(UITableView *)tableView canMoveRowAtIndexPath:(NSIndexPath *)indexPath {
-    return YES;
+    return indexPath.section == SGRQueueSectionQueue;
+}
+
+- (NSIndexPath *)tableView:(UITableView *)tableView targetIndexPathForMoveFromRowAtIndexPath:(NSIndexPath *)sourceIndexPath toProposedIndexPath:(NSIndexPath *)proposedDestinationIndexPath {
+    if (proposedDestinationIndexPath.section < SGRQueueSectionQueue) {
+        return [NSIndexPath indexPathForRow:0 inSection:SGRQueueSectionQueue];
+    }
+    return proposedDestinationIndexPath;
 }
 
 - (void)tableView:(UITableView *)tableView moveRowAtIndexPath:(NSIndexPath *)sourceIndexPath toIndexPath:(NSIndexPath *)destinationIndexPath {
-    if (sourceIndexPath.row == destinationIndexPath.row || sourceIndexPath.row >= (NSInteger)_tracks.count) return;
-    NSMutableArray *mut = [_tracks mutableCopy];
+    if (sourceIndexPath.section != SGRQueueSectionQueue || destinationIndexPath.section != SGRQueueSectionQueue) return;
+    if (sourceIndexPath.row == destinationIndexPath.row || sourceIndexPath.row >= (NSInteger)_futureTracks.count) return;
+    NSMutableArray *mut = [_futureTracks mutableCopy];
     SPTPlayerTrack *moved = mut[sourceIndexPath.row];
     [mut removeObjectAtIndex:sourceIndexPath.row];
-    [mut insertObject:moved atIndex:destinationIndexPath.row];
-    _tracks = [mut copy];
+    NSInteger dest = destinationIndexPath.row;
+    if (dest > (NSInteger)mut.count) dest = mut.count;
+    [mut insertObject:moved atIndex:dest];
+    _futureTracks = [mut copy];
+}
+
+- (NSArray<UIDragItem *> *)tableView:(UITableView *)tableView itemsForBeginningDragSession:(id<UIDragSession>)session atIndexPath:(NSIndexPath *)indexPath {
+    if (indexPath.section != SGRQueueSectionQueue || indexPath.row >= (NSInteger)_futureTracks.count) return @[];
+    SPTPlayerTrack *track = _futureTracks[indexPath.row];
+    NSItemProvider *provider = [[NSItemProvider alloc] initWithObject:track.trackTitle ?: @"track"];
+    UIDragItem *item = [[UIDragItem alloc] initWithItemProvider:provider];
+    item.localObject = track;
+    return @[item];
+}
+
+- (UITableViewDropProposal *)tableView:(UITableView *)tableView dropSessionDidUpdate:(id<UIDropSession>)session withDestinationIndexPath:(NSIndexPath *)destinationIndexPath {
+    if (destinationIndexPath && destinationIndexPath.section == SGRQueueSectionQueue) {
+        return [[UITableViewDropProposal alloc] initWithDropOperation:UIDropOperationMove intent:UITableViewDropIntentInsertAtDestinationIndexPath];
+    }
+    return [[UITableViewDropProposal alloc] initWithDropOperation:UIDropOperationCancel];
+}
+
+- (void)tableView:(UITableView *)tableView performDropWithCoordinator:(id<UITableViewDropCoordinator>)coordinator {
+    NSIndexPath *destinationIndexPath = coordinator.destinationIndexPath;
+    if (!destinationIndexPath || destinationIndexPath.section != SGRQueueSectionQueue) return;
+    id<UITableViewDropItem> dropItem = coordinator.items.firstObject;
+    if (!dropItem || !dropItem.sourceIndexPath || dropItem.sourceIndexPath.section != SGRQueueSectionQueue) return;
+
+    NSInteger sourceRow = dropItem.sourceIndexPath.row;
+    NSInteger destRow = destinationIndexPath.row;
+    if (sourceRow == destRow || sourceRow >= (NSInteger)_futureTracks.count || destRow > (NSInteger)_futureTracks.count) return;
+
+    NSMutableArray *mut = [_futureTracks mutableCopy];
+    SPTPlayerTrack *moved = mut[sourceRow];
+    [mut removeObjectAtIndex:sourceRow];
+    if (destRow > (NSInteger)mut.count) destRow = mut.count;
+    [mut insertObject:moved atIndex:destRow];
+    _futureTracks = [mut copy];
+
+    [coordinator dropItem:dropItem toRowAtIndexPath:destinationIndexPath];
+}
+
+#pragma mark - Context Menu (1:1 Apple Music)
+
+- (UIContextMenuConfiguration *)tableView:(UITableView *)tableView contextMenuConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath point:(CGPoint)point {
+    SPTPlayerTrack *track = [self trackForIndexPath:indexPath];
+    if (!track) return nil;
+
+    __weak typeof(self) weakSelf = self;
+    return [UIContextMenuConfiguration configurationWithIdentifier:nil previewProvider:^UIViewController *{
+        return [weakSelf previewViewControllerForTrack:track];
+    } actionProvider:^UIMenu *(NSArray<UIMenuElement *> *suggestedActions) {
+        return [weakSelf contextMenuForTrack:track atIndexPath:indexPath];
+    }];
+}
+
+- (UIViewController *)previewViewControllerForTrack:(SPTPlayerTrack *)track {
+    UIViewController *vc = [UIViewController new];
+    vc.preferredContentSize = CGSizeMake(280.0, 72.0);
+    UIView *view = vc.view;
+    view.backgroundColor = [UIColor colorWithWhite:0.12 alpha:0.9];
+
+    UIImageView *cover = [[UIImageView alloc] initWithFrame:CGRectMake(12.0, 9.0, 54.0, 54.0)];
+    cover.contentMode = UIViewContentModeScaleAspectFill;
+    cover.layer.cornerRadius = 6.0;
+    cover.layer.cornerCurve = kCACornerCurveContinuous;
+    cover.clipsToBounds = YES;
+    cover.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.1];
+    [view addSubview:cover];
+
+    loadArtworkForTrack(track, cover, nil);
+
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(76.0, 14.0, 175.0, 20.0)];
+    title.font = [UIFont systemFontOfSize:15.5 weight:UIFontWeightBold];
+    title.textColor = UIColor.whiteColor;
+    title.text = track.trackTitle ?: @"Track";
+    [view addSubview:title];
+
+    NSDictionary *meta = [track respondsToSelector:@selector(metadata)] ? track.metadata : nil;
+    NSString *album = [meta isKindOfClass:NSDictionary.class] ? meta[@"album_title"] : nil;
+    NSString *subText = track.artistName ?: @"Artist";
+    if (album.length) subText = [NSString stringWithFormat:@"%@ • %@", subText, album];
+
+    UILabel *subtitle = [[UILabel alloc] initWithFrame:CGRectMake(76.0, 36.0, 175.0, 18.0)];
+    subtitle.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular];
+    subtitle.textColor = [UIColor colorWithWhite:1.0 alpha:0.65];
+    subtitle.text = subText;
+    [view addSubview:subtitle];
+
+    UIImageSymbolConfiguration *chevConfig = [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
+    UIImageView *chevron = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"chevron.right" withConfiguration:chevConfig]];
+    chevron.tintColor = [UIColor colorWithWhite:1.0 alpha:0.35];
+    chevron.frame = CGRectMake(255.0, 28.0, 14.0, 16.0);
+    chevron.contentMode = UIViewContentModeCenter;
+    [view addSubview:chevron];
+
+    return vc;
+}
+
+- (UIMenu *)contextMenuForTrack:(SPTPlayerTrack *)track atIndexPath:(NSIndexPath *)indexPath {
+    __weak typeof(self) weakSelf = self;
+    NSMutableArray<UIMenuElement *> *actions = [NSMutableArray array];
+
+    if (indexPath.section == SGRQueueSectionQueue && indexPath.row > 0) {
+        UIAction *playNext = [UIAction actionWithTitle:@"Move to Top" image:[UIImage systemImageNamed:@"arrow.up.to.line"] identifier:nil handler:^(__kindof UIAction *action) {
+            SGRQueueView *strongSelf = weakSelf;
+            if (!strongSelf || indexPath.row >= (NSInteger)strongSelf->_futureTracks.count) return;
+            NSMutableArray *mut = [strongSelf->_futureTracks mutableCopy];
+            SPTPlayerTrack *item = mut[indexPath.row];
+            [mut removeObjectAtIndex:indexPath.row];
+            [mut insertObject:item atIndex:0];
+            strongSelf->_futureTracks = [mut copy];
+            [strongSelf->_tableView reloadData];
+        }];
+        [actions addObject:playNext];
+    }
+
+    UIAction *playlistAction = [UIAction actionWithTitle:@"Add to Playlist" image:[UIImage systemImageNamed:@"music.note.list"] identifier:nil handler:^(__kindof UIAction *action) {
+    }];
+    [actions addObject:playlistAction];
+
+    UIAction *favoriteAction = [UIAction actionWithTitle:@"Favorite" image:[UIImage systemImageNamed:@"star"] identifier:nil handler:^(__kindof UIAction *action) {
+        SGLikePlayingTrack();
+    }];
+    [actions addObject:favoriteAction];
+
+    if (indexPath.section == SGRQueueSectionQueue) {
+        UIAction *removeAction = [UIAction actionWithTitle:@"Remove from Queue" image:[UIImage systemImageNamed:@"trash"] identifier:nil handler:^(__kindof UIAction *action) {
+            [weakSelf deleteRowAtIndexPath:indexPath];
+        }];
+        removeAction.attributes = UIMenuElementAttributesDestructive;
+        [actions addObject:removeAction];
+    }
+
+    UIAction *shareAction = [UIAction actionWithTitle:@"Share Track" image:[UIImage systemImageNamed:@"square.and.arrow.up"] identifier:nil handler:^(__kindof UIAction *action) {
+    }];
+    [actions addObject:shareAction];
+
+    return [UIMenu menuWithTitle:@"" children:actions];
 }
 
 #pragma mark - UITableViewDelegate
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    if (indexPath.row >= (NSInteger)_tracks.count) return;
 
-    SPTPlayerTrack *track = _tracks[indexPath.row];
-    id player = SGPlayer();
-    if ([player respondsToSelector:@selector(skipToNextTrackWithOptions:track:)]) {
-        [(id<SPTPlayer>)player skipToNextTrackWithOptions:nil track:track];
-    } else if ([player respondsToSelector:@selector(skipToNextTrack)]) {
-        [(id<SPTPlayer>)player skipToNextTrack];
+    if (indexPath.section == SGRQueueSectionCurrent) return;
+
+    if (indexPath.section == SGRQueueSectionHistory) {
+        if (indexPath.row >= (NSInteger)_historyTracks.count) return;
+        SPTPlayerTrack *track = _historyTracks[indexPath.row];
+        id player = SGPlayer();
+        if ([player respondsToSelector:@selector(skipToPreviousTrackWithOptions:track:)]) {
+            [player skipToPreviousTrackWithOptions:nil track:track];
+        } else if ([player respondsToSelector:@selector(skipToPreviousTrackWithOptions:)]) {
+            [player skipToPreviousTrackWithOptions:nil];
+        }
+        return;
+    }
+
+    if (indexPath.section == SGRQueueSectionQueue) {
+        if (indexPath.row >= (NSInteger)_futureTracks.count) return;
+        SPTPlayerTrack *track = _futureTracks[indexPath.row];
+        id player = SGPlayer();
+        if ([player respondsToSelector:@selector(skipToNextTrackWithOptions:track:)]) {
+            [(id<SPTPlayer>)player skipToNextTrackWithOptions:nil track:track];
+        } else if ([player respondsToSelector:@selector(skipToNextTrack)]) {
+            [(id<SPTPlayer>)player skipToNextTrack];
+        }
     }
 }
 

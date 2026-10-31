@@ -224,10 +224,23 @@ static SGRLyricsLayout layoutIn(UIView *host) {
     CGRect row = untransformed(info, host), bar = untransformed(duration, host);
 
     BOOL isQueue = (sg_inlineMode == SGRPlayerInlineModeQueue);
-    CGFloat thumbSide = isQueue ? 52.0 : kThumbSide;
-    CGFloat thumbGap = isQueue ? 14.0 : kThumbGap;
-    CGFloat thumbTop = isQueue ? 4.0 : kThumbTop;
-    CGFloat stageTopGap = isQueue ? 12.0 : kLyricsTop;
+    if (isQueue) {
+        CGFloat top = CGRectGetMinY(area);
+        if (top < 10.0) top = 44.0;
+        CGFloat bottom = CGRectGetMinY(bar) - kLyricsBottom;
+        l.cover = cover;
+        l.thumb = CGRectMake(CGRectGetMinX(area), top, 52.0, 52.0);
+        l.stage = CGRectMake(0, top, host.bounds.size.width, MAX(0, bottom - top));
+        l.lift = -100;
+        l.shift = 0;
+        l.ok = (l.stage.size.height > kLivingHeight / 2);
+        return l;
+    }
+
+    CGFloat thumbSide = kThumbSide;
+    CGFloat thumbGap = kThumbGap;
+    CGFloat thumbTop = kThumbTop;
+    CGFloat stageTopGap = kLyricsTop;
 
     // The thumbnail takes the title's own leading edge, so the two line up down the page.
     CGFloat leading = title ? CGRectGetMinX(untransformed(title, host)) : CGRectGetMinX(area) + SGRSideMargin;
@@ -293,6 +306,11 @@ static void clipTitle(UIView *element, CGFloat width) {
 static void placeTitleRow(SGRLyricsLayout l) {
     UIView *info = sg_info.viewIfLoaded;
     if (!info) return;
+    if (sg_inlineMode == SGRPlayerInlineModeQueue) {
+        info.alpha = 0;
+        return;
+    }
+    info.alpha = 1;
     [SGRowIn(info) layoutIfNeeded];
     CGFloat lift = isStageOpen() ? l.lift : 0, shift = isStageOpen() ? l.shift : 0;
     CGAffineTransform rise = CGAffineTransformMakeTranslation(0, round(lift));
@@ -337,6 +355,12 @@ static void place(SGRPlayerLyricsOverlay *overlay, UIView *host, SGRLyricsLayout
     plate.center = CGPointMake(CGRectGetMidX(overlay.thumb.bounds), CGRectGetMidY(overlay.thumb.bounds));
     overlay.stage.bounds = (CGRect){CGPointZero, stage.size};
     overlay.stage.center = CGPointMake(CGRectGetMidX(stage), CGRectGetMidY(stage));
+    if (sg_inlineMode == SGRPlayerInlineModeQueue) {
+        overlay.thumb.alpha = 0;
+        overlay.thumb.hidden = YES;
+    } else {
+        overlay.thumb.hidden = NO;
+    }
 }
 
 // Where the thumbnail's view has to go to land on `l.thumb`, as a transform about its own center: the
@@ -652,6 +676,8 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
         void (^layoutSwap)(void) = ^{
             overlay.thumb.transform = thumbTransform(newL);
             overlay.cover.layer.cornerRadius = thumbRadius(newL, YES);
+            overlay.thumb.alpha = (targetMode == SGRPlayerInlineModeQueue) ? 0 : 1;
+            if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = (targetMode == SGRPlayerInlineModeQueue) ? 0 : 1;
             placeTitleRow(newL);
             sg_header.viewIfLoaded.alpha = (targetMode == SGRPlayerInlineModeQueue) ? 0 : 1;
         };
@@ -709,7 +735,7 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
     BOOL fades = SGRPlayerMotionShowing();
 
     overlay.thumb.transform = open && !fades ? CGAffineTransformIdentity : away;
-    overlay.thumb.alpha = open && fades ? 0 : 1;
+    overlay.thumb.alpha = (open && targetMode == SGRPlayerInlineModeQueue) ? 0 : (open && fades ? 0 : 1);
     overlay.cover.layer.cornerRadius = thumbRadius(l, fades || !open);
 
     CGAffineTransform entering = SGRReduceMotion() ? CGAffineTransformIdentity : CGAffineTransformMakeScale(kLyricsEnterScale, kLyricsEnterScale);
@@ -733,6 +759,8 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
             overlay.queue.alpha = 1;
             overlay.lyrics.hidden = YES;
             overlay.lyrics.alpha = 0;
+            overlay.thumb.alpha = 0;
+            if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 0;
             overlay.queue.frame = overlay.stage.bounds;
             [overlay.queue reloadTracks];
         }
@@ -746,9 +774,10 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
         placeTitleRow(l);
     };
     void (^fade)(void) = ^{
-        overlay.thumb.alpha = !open && fades ? 0 : 1;
+        overlay.thumb.alpha = (open && targetMode == SGRPlayerInlineModeQueue) ? 0 : (!open && fades ? 0 : 1);
         sg_floating.viewIfLoaded.alpha = open ? 0 : 1;
         sg_header.viewIfLoaded.alpha = (open && targetMode == SGRPlayerInlineModeQueue) ? 0 : 1;
+        if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = (open && targetMode == SGRPlayerInlineModeQueue) ? 0 : 1;
     };
     void (^show)(void) = ^{
         overlay.stage.alpha = open ? 1 : 0;
@@ -756,8 +785,15 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
     };
     void (^settled)(BOOL) = ^(BOOL finished) {
         sg_moving = NO;
-        if (isStageOpen()) return;
+        if (isStageOpen()) {
+            if (sg_inlineMode == SGRPlayerInlineModeQueue) {
+                overlay.thumb.alpha = 0;
+                if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 0;
+            }
+            return;
+        }
         SGRPlayerCoverList().alpha = 1;
+        if (sg_info.viewIfLoaded) sg_info.viewIfLoaded.alpha = 1;
         [overlay removeFromSuperview];
     };
 

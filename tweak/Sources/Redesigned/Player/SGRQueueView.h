@@ -1,5 +1,7 @@
 // Apple Music style inline queue view for the redesigned player.
-// Displays upcoming tracks ("Playing Next") inside the player stage without opening a modal sheet.
+// Displays history, currently playing track with star & context actions,
+// and upcoming tracks ("Continue Playing") with Apple Music pill buttons,
+// swipe-to-delete, drag-to-reorder, and long-press context menus.
 
 #import <UIKit/UIKit.h>
 #import "Headers/SPTPlayer.h"
@@ -7,7 +9,7 @@
 
 @interface SGRQueueView : UIView <SGPlayerStateObserver>
 
-// Reloads the upcoming tracks and playback controls from the current player state.
+// Reloads the upcoming tracks, history, and playback controls from current player state.
 - (void)reloadTracks;
 
 // Updates the queue with a fresh state report.
