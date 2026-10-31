@@ -31,6 +31,9 @@ static BOOL sameURI(NSString *a, NSString *b) {
     return a == b || [a isEqualToString:b];
 }
 
+static NSUInteger sg_stateFutureCount;
+static NSString *sg_stateFutureTrack;
+
 // What an observer is told about; the state object itself is new with every position report.
 static void publish(SPTPlayerState *state) {
     sg_playerState = state;
@@ -42,12 +45,24 @@ static void publish(SPTPlayerState *state) {
     BOOL paused = state.isPaused, playing = state.isPlaying;
     BOOL loading = [state respondsToSelector:@selector(isLoading)] && state.isLoading;
     BOOL shuffling = [options respondsToSelector:@selector(shufflingContext)] && options.shufflingContext;
-    int bits = paused | playing << 1 | loading << 2 | shuffling << 3;
-    if (sg_stateSeen && bits == sg_stateBits && sameURI(track, sg_stateTrack) && sameURI(context, sg_stateContext)) return;
+    BOOL repeating = [options respondsToSelector:@selector(repeatingContext)] && options.repeatingContext;
+    BOOL repeatingTrack = [options respondsToSelector:@selector(repeatingTrack)] && options.repeatingTrack;
+    int bits = paused | (playing << 1) | (loading << 2) | (shuffling << 3) | (repeating << 4) | (repeatingTrack << 5);
+
+    id future = [state respondsToSelector:@selector(future)] ? state.future : nil;
+    NSArray *futureList = [future isKindOfClass:NSArray.class] ? (NSArray *)future : nil;
+    NSUInteger futureCount = futureList.count;
+    id firstFuture = futureCount > 0 ? futureList[0] : nil;
+    NSString *futureTrack = [firstFuture respondsToSelector:@selector(URI)] ? SGURIString([firstFuture URI]) : nil;
+
+    if (sg_stateSeen && bits == sg_stateBits && sameURI(track, sg_stateTrack) && sameURI(context, sg_stateContext)
+        && futureCount == sg_stateFutureCount && sameURI(futureTrack, sg_stateFutureTrack)) return;
     sg_stateSeen = YES;
     sg_stateTrack = track;
     sg_stateContext = context;
     sg_stateBits = bits;
+    sg_stateFutureCount = futureCount;
+    sg_stateFutureTrack = futureTrack;
     for (id<SGPlayerStateObserver> observer in sg_stateObservers.allObjects) [observer playerStateDidChange:state];
 }
 

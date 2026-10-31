@@ -154,7 +154,11 @@ static void styleFooter(UIViewController *unit) {
     SGRGlyphButton *queue = glyphButtonIn(host, &kQueueKey, @"list.bullet", @"Queue", SGRPlayerQueueOpen() ? SGRPrimary() : SGRSecondary(), ^{
         SGRPlayerToggleQueue();
     });
-    queue.glyph.tintColor = SGRPlayerQueueOpen() ? SGRPrimary() : SGRSecondary();
+    BOOL queueOpen = SGRPlayerQueueOpen();
+    queue.glyph.tintColor = queueOpen ? SGRPrimary() : SGRSecondary();
+    queue.backgroundColor = queueOpen ? [UIColor colorWithWhite:1.0 alpha:0.18] : UIColor.clearColor;
+    queue.layer.cornerRadius = 22.0;
+    queue.clipsToBounds = YES;
     queue.bounds = CGRectMake(0, 0, 44, 44);
     queue.center = CGPointMake(slot(2), middleY);
 

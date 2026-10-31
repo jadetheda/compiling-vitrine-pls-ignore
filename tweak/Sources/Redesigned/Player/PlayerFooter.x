@@ -99,6 +99,9 @@ void SGRPlayerLyricsChanged(void) {
     void (^mark)(void) = ^{
         glyph.enabled = enabled;
         glyph.glyph.tintColor = open ? SGRPrimary() : SGRSecondary();
+        glyph.backgroundColor = open ? [UIColor colorWithWhite:1.0 alpha:0.18] : UIColor.clearColor;
+        glyph.layer.cornerRadius = glyph.bounds.size.height > 0 ? glyph.bounds.size.height / 2.0 : 22.0;
+        glyph.clipsToBounds = YES;
     };
     if (animated) SGRAnimate(SGRMotionFade, mark, nil);
     else mark();
@@ -128,6 +131,9 @@ void SGRPlayerQueueChanged(void) {
     BOOL animated = glyph.window && !SGRPlayerIsTransitioning();
     void (^mark)(void) = ^{
         glyph.glyph.tintColor = open ? SGRPrimary() : SGRSecondary();
+        glyph.backgroundColor = open ? [UIColor colorWithWhite:1.0 alpha:0.18] : UIColor.clearColor;
+        glyph.layer.cornerRadius = glyph.bounds.size.height > 0 ? glyph.bounds.size.height / 2.0 : 22.0;
+        glyph.clipsToBounds = YES;
     };
     if (animated) SGRAnimate(SGRMotionFade, mark, nil);
     else mark();

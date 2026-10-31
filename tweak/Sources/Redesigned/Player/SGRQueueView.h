@@ -3,10 +3,11 @@
 
 #import <UIKit/UIKit.h>
 #import "Headers/SPTPlayer.h"
+#import "Shared/Player/PlayerState.h"
 
-@interface SGRQueueView : UIView
+@interface SGRQueueView : UIView <SGPlayerStateObserver>
 
-// Reloads the upcoming tracks from the current player state.
+// Reloads the upcoming tracks and playback controls from the current player state.
 - (void)reloadTracks;
 
 // Updates the queue with a fresh state report.
