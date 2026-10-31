@@ -29,7 +29,7 @@
 #import "Redesigned/Kit/SGRKit.h"
 #import "Redesigned/Lyrics/SGRKaraokeView.h"
 #import "Redesigned/Lyrics/SGRSingButton.h"
-#import "SGRQueueView.h"
+#import "Redesigned/Player/SGRQueueView.h"
 #import "Settings/SGPageStyle.h"
 #import "Shared/Sing/Sing.h"
 #import "Shared/Lyrics/Lyrics.h"

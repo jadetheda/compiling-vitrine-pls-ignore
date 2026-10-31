@@ -63,6 +63,8 @@
 - (id)skipToPreviousTrackWithOptions:(id)options;
 // Skips ahead to `track`, one of the state's future tracks.
 - (id)skipToNextTrackWithOptions:(id)options track:(SPTPlayerTrack *)track;
+// Skips back to `track`, one of the state's reverse tracks.
+- (id)skipToPreviousTrackWithOptions:(id)options track:(SPTPlayerTrack *)track;
 - (id)setShufflingContext:(BOOL)on;
 - (id)setRepeatingContext:(BOOL)on;
 - (id)setRepeatingTrack:(BOOL)on;
