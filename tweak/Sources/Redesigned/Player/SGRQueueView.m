@@ -1585,8 +1585,10 @@ static UIImage *SGRTransitionsGlyphImage(UIColor *tintColor) {
         [strongSelf updateNowPlayingStarAppearance];
     }];
     UIAction *shareAct = [UIAction actionWithTitle:@"Share" image:[UIImage systemImageNamed:@"square.and.arrow.up"] identifier:nil handler:^(__kindof UIAction *action) {
-        if (!trackURI.length) return;
-        UIViewController *top = SGTopController();
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || !trackURI.length) return;
+        UIViewController *top = strongSelf.window.rootViewController;
+        while (top.presentedViewController) top = top.presentedViewController;
         if (top) {
             UIActivityViewController *avc = [[UIActivityViewController alloc] initWithActivityItems:@[trackURI] applicationActivities:nil];
             [top presentViewController:avc animated:YES completion:nil];
