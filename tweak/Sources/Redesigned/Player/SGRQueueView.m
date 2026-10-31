@@ -1869,7 +1869,6 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 - (UIButton *)createPlaybackPillWithAction:(SEL)action {
     UIButton *pill = [UIButton buttonWithType:UIButtonTypeCustom];
     pill.backgroundColor = UIColor.clearColor;
-    pill.adjustsImageWhenHighlighted = NO;
     pill.layer.cornerRadius = 18.0;
     pill.layer.cornerCurve = kCACornerCurveContinuous;
     pill.clipsToBounds = YES;
