@@ -29,7 +29,14 @@
 #import "Redesigned/Kit/SGRKit.h"
 #import "Redesigned/Lyrics/SGRKaraokeView.h"
 #import "Redesigned/Lyrics/SGRSingButton.h"
+#if __has_include("Redesigned/Player/SGRQueueView.h")
 #import "Redesigned/Player/SGRQueueView.h"
+#else
+@interface SGRQueueView : UIView
+- (void)reloadTracks;
+- (void)updateWithState:(id)state;
+@end
+#endif
 #import "Settings/SGPageStyle.h"
 #import "Shared/Sing/Sing.h"
 #import "Shared/Lyrics/Lyrics.h"
@@ -179,7 +186,8 @@ static BOOL keepsTitle(void) {
 // hides all siblings inside its superview (_stage) whenever it lays out.
 - (SGRQueueView *)queue {
     if (!_queue) {
-        _queue = [[SGRQueueView alloc] initWithFrame:self.bounds];
+        Class queueClass = NSClassFromString(@"SGRQueueView") ?: UIView.class;
+        _queue = [[queueClass alloc] initWithFrame:self.bounds];
     }
     if (_queue.superview != self) [self addSubview:_queue];
     return _queue;
@@ -704,7 +712,7 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
             q.hidden = NO;
             q.alpha = 0;
             q.transform = CGAffineTransformIdentity;
-            [q reloadTracks];
+            if ([q respondsToSelector:@selector(reloadTracks)]) [q reloadTracks];
             void (^swap)(void) = ^{
                 q.alpha = 1;
                 overlay.stage.alpha = 0;
@@ -802,7 +810,7 @@ static void setMode(SGRPlayerInlineMode targetMode, BOOL animated) {
             q.hidden = NO;
             q.alpha = 0;
             q.transform = entering;
-            [q reloadTracks];
+            if ([q respondsToSelector:@selector(reloadTracks)]) [q reloadTracks];
         }
 
         SGRPlayerCoverList().alpha = 0;
@@ -1110,7 +1118,7 @@ static void durationUnitLaidOut(UIViewController *unit) {
 - (void)playerStateDidChange:(SPTPlayerState *)state {
     if (sg_inlineMode == SGRPlayerInlineModeQueue) {
         SGRPlayerLyricsOverlay *overlay = objc_getAssociatedObject(sg_host, &kOverlayKey);
-        [overlay.existingQueue updateWithState:state];
+        if ([overlay.existingQueue respondsToSelector:@selector(updateWithState:)]) [overlay.existingQueue updateWithState:state];
     }
     // A pause brings the controls back and keeps them; playing again starts the clock.
     if (state.isPaused) {

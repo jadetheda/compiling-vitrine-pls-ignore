@@ -23,10 +23,10 @@ static const SGRDisc kDisc[kDiscs] = {
 // How far a breath takes a disc's size either way, and how long new colors take to blend in.
 static const CGFloat kBreathSmall = 0.85, kBreathLarge = 1.18;
 static const CFTimeInterval kRecolor = 1.2;
-// The color under the discs is the artwork's main color at this share of its light.
-static const CGFloat kBaseShade = 0.55;
+// The color under the discs is the artwork's main color at this share of its light, forming a rich continuous base.
+static const CGFloat kBaseShade = 0.78;
 // The shade over everything: clear down to this share of the height, then this much black at the bottom.
-static const CGFloat kShadeFrom = 0.45, kShadeBottom = 0.35;
+static const CGFloat kShadeFrom = 0.48, kShadeBottom = 0.26;
 
 static NSDictionary *noActions(void) {
     static NSDictionary *none;
@@ -46,7 +46,7 @@ static UIColor *shaded(UIColor *color, CGFloat share) {
 }
 
 static NSArray *discColors(UIColor *color) {
-    return @[(id)color.CGColor, (id)[color colorWithAlphaComponent:0.55].CGColor, (id)[color colorWithAlphaComponent:0].CGColor];
+    return @[(id)color.CGColor, (id)[color colorWithAlphaComponent:0.68].CGColor, (id)[color colorWithAlphaComponent:0].CGColor];
 }
 
 @implementation SGRFlowLayer {
@@ -72,7 +72,7 @@ static NSArray *discColors(UIColor *color) {
         disc.type = kCAGradientLayerRadial;
         disc.startPoint = CGPointMake(0.5, 0.5);
         disc.endPoint = CGPointMake(1, 1);
-        disc.locations = @[@0, @0.45, @1];
+        disc.locations = @[@0, @0.52, @1];
         disc.colors = discColors(UIColor.clearColor);
         // The whole artwork's color lies under the four quarters', so it fills between them rather than over them.
         if (i == kDiscs - 1) [self insertSublayer:disc above:_base];

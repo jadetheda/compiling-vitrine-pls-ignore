@@ -300,10 +300,16 @@ void SGRPlayerSetCoverAccent(UIColor *cover) {
     NSInteger rgb = -1;
     CGFloat h, s, v, a;
     if ([cover getHue:&h saturation:&s brightness:&v alpha:&a] && s >= 0.15) {
-        // Bright and clear enough to read on the dark player, the hue kept.
-        UIColor *bright = [UIColor colorWithHue:h saturation:MIN(0.85, MAX(0.45, s)) brightness:MAX(0.9, v) alpha:1];
-        CGFloat r, g, b;
+        // Bright and clear enough to read on the dark player (CR >= 3.0 against dark base), the hue kept.
+        CGFloat sat = MIN(0.84, MAX(0.45, s));
+        CGFloat val = MAX(0.88, v);
+        UIColor *bright = [UIColor colorWithHue:h saturation:sat brightness:val alpha:1];
+        CGFloat r = 0, g = 0, b = 0;
         [bright getRed:&r green:&g blue:&b alpha:&a];
+        if (SGRContrastRatio255(r * 255.0, g * 255.0, b * 255.0, 28.0, 28.0, 30.0) < 3.0) {
+            bright = [UIColor colorWithHue:h saturation:MIN(0.75, sat) brightness:0.96 alpha:1];
+            [bright getRed:&r green:&g blue:&b alpha:&a];
+        }
         rgb = ((NSInteger)lround(r * 255) << 16) | ((NSInteger)lround(g * 255) << 8) | (NSInteger)lround(b * 255);
     }
     if (rgb == sg_cover) return;

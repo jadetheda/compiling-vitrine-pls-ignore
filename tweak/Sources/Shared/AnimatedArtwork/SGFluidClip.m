@@ -17,7 +17,8 @@ static const struct { CGFloat side, x, y, opacity, angle; } kCopy[] = {
 enum { kCopies = sizeof(kCopy) / sizeof(kCopy[0]) };
 static const CGFloat kSway = 0.35, kDrift = 0.06;
 // The blurred cover is small, as in SGRFluid.m, and the field is drawn at this fraction of the clip's size.
-static const CGFloat kBlurSide = 128, kBlurRadius = 10, kSaturation = 1.5, kBrightness = -0.08, kFieldScale = 0.125;
+static const int kBlurSide = 128;
+static const CGFloat kBlurRadius = 10, kSaturation = 1.38, kLuminanceKnee = 0.35, kLightCeiling = 0.095, kFieldScale = 0.125;
 // The shade over the bottom, where the lock screen's controls are.
 static const CGFloat kShadeFrom = 0.55, kShadeAlpha = 0.45;
 // The cover's side as a share of the clip's width, and its center's height from the top. The lock screen
@@ -35,20 +36,94 @@ static CGContextRef newContext(CGSize size, void *data, size_t bytesPerRow) {
     return context;
 }
 
-// The cover small, blurred and saturated, as SGRFluid.m makes it.
+static inline double linearFromSRGBClip(double c) {
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+
+static inline double relativeLuminanceClip(double r, double g, double b) {
+    return 0.2126 * linearFromSRGBClip(r) + 0.7152 * linearFromSRGBClip(g) + 0.0722 * linearFromSRGBClip(b);
+}
+
+// The cover small, blurred in sRGB and saturated with gamut-preserving Rec. 709 chroma and soft-knee luminance compression.
 static CGImageRef newBlurred(CGImageRef cover) CF_RETURNS_RETAINED {
     static CIContext *renderer;
     static dispatch_once_t once;
-    // On the CPU: the lock screen asks while Spotify is in the background, where GPU work gets it killed.
-    dispatch_once(&once, ^{ renderer = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @YES}]; });
+    // On the CPU in sRGB: the lock screen asks while Spotify is in the background, where GPU work gets it killed,
+    // and linear working space with CIColorControls crushes minor channels to black (#100).
+    dispatch_once(&once, ^{
+        CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        renderer = [CIContext contextWithOptions:@{
+            kCIContextWorkingColorSpace: (__bridge id)srgb,
+            kCIContextUseSoftwareRenderer: @YES,
+        }];
+        CGColorSpaceRelease(srgb);
+    });
     CIImage *input = [CIImage imageWithCGImage:cover];
-    CGFloat scale = kBlurSide / MAX(input.extent.size.width, input.extent.size.height);
+    CGFloat scale = (CGFloat)kBlurSide / MAX(input.extent.size.width, input.extent.size.height);
     input = [input imageByApplyingTransform:CGAffineTransformMakeScale(scale, scale)];
     CGRect extent = input.extent;
-    CIImage *output = [[[input imageByClampingToExtent]
-        imageByApplyingFilter:@"CIGaussianBlur" withInputParameters:@{kCIInputRadiusKey: @(kBlurRadius)}]
-        imageByApplyingFilter:@"CIColorControls" withInputParameters:@{kCIInputSaturationKey: @(kSaturation), kCIInputBrightnessKey: @(kBrightness)}];
-    return [renderer createCGImage:[output imageByCroppingToRect:extent] fromRect:extent];
+    CIImage *output = [[input imageByClampingToExtent]
+        imageByApplyingFilter:@"CIGaussianBlur" withInputParameters:@{kCIInputRadiusKey: @(kBlurRadius)}];
+    CGImageRef blurred = [renderer createCGImage:[output imageByCroppingToRect:extent] fromRect:extent];
+    if (!blurred) return NULL;
+
+    size_t width = CGImageGetWidth(blurred), height = CGImageGetHeight(blurred);
+    if (width < 1 || height < 1) return blurred;
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef context = CGBitmapContextCreate(NULL, width, height, 8, width * 4, space,
+                                                 (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(space);
+    if (!context) return blurred;
+    CGContextDrawImage(context, CGRectMake(0, 0, width, height), blurred);
+    CGImageRelease(blurred);
+
+    uint8_t *pixels = CGBitmapContextGetData(context);
+    size_t count = width * height;
+    double lightSum = 0;
+    for (size_t i = 0; i < count; i++) {
+        uint8_t *p = pixels + i * 4;
+        double r = p[0] / 255.0, g = p[1] / 255.0, b = p[2] / 255.0;
+        double y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        double dr = r - y, dg = g - y, db = b - y;
+        double sMax = kSaturation;
+        if (dr > 1e-6 && y + sMax * dr > 1.0) sMax = MIN(sMax, (1.0 - y) / dr);
+        if (dg > 1e-6 && y + sMax * dg > 1.0) sMax = MIN(sMax, (1.0 - y) / dg);
+        if (db > 1e-6 && y + sMax * db > 1.0) sMax = MIN(sMax, (1.0 - y) / db);
+        double minLim = y * 0.14;
+        if (dr < -1e-6 && y + sMax * dr < minLim) sMax = MIN(sMax, (y - minLim) / (-dr));
+        if (dg < -1e-6 && y + sMax * dg < minLim) sMax = MIN(sMax, (y - minLim) / (-dg));
+        if (db < -1e-6 && y + sMax * db < minLim) sMax = MIN(sMax, (y - minLim) / (-db));
+        double sEff = 1.0 + (kSaturation - 1.0) * (0.45 + 0.55 * MIN(1.0, MAX(0.0, (sMax - 1.0) / (kSaturation - 1.0))));
+        r = MIN(1.0, MAX(0.0, y + sEff * dr));
+        g = MIN(1.0, MAX(0.0, y + sEff * dg));
+        b = MIN(1.0, MAX(0.0, y + sEff * db));
+
+        double lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if (lum > 1e-5) {
+            double targetLum = lum / (1.0 + kLuminanceKnee * lum);
+            double ratio = targetLum / lum;
+            r = MIN(1.0, r * ratio);
+            g = MIN(1.0, g * ratio);
+            b = MIN(1.0, b * ratio);
+        }
+        p[0] = (uint8_t)lround(r * 255.0);
+        p[1] = (uint8_t)lround(g * 255.0);
+        p[2] = (uint8_t)lround(b * 255.0);
+        lightSum += relativeLuminanceClip(p[0] / 255.0, p[1] / 255.0, p[2] / 255.0);
+    }
+    double meanLight = count > 0 ? lightSum / (double)count : 0;
+    if (meanLight > kLightCeiling) {
+        double scaleLight = pow(kLightCeiling / meanLight, 1.0 / 2.2);
+        for (size_t i = 0; i < count; i++) {
+            uint8_t *p = pixels + i * 4;
+            p[0] = (uint8_t)lround(p[0] * scaleLight);
+            p[1] = (uint8_t)lround(p[1] * scaleLight);
+            p[2] = (uint8_t)lround(p[2] * scaleLight);
+        }
+    }
+    CGImageRef saturated = CGBitmapContextCreateImage(context);
+    CGContextRelease(context);
+    return saturated;
 }
 
 // Where the cover's picture goes with its shadow around it: the frame of the image newCover makes.

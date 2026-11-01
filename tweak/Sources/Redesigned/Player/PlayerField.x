@@ -64,15 +64,21 @@ void SGRPlayerHoldField(void) {
 
 #pragma mark - the field
 
-// Follow the cover: the most colorful of the cover's five colors (its quarters and the whole), once per artwork. A
-// white wall behind a pink subject has the wall as the whole's color, too gray to give an accent.
+// Follow the cover: prefer MPArtworkColorAnalyzer's primaryColor when colorful, or the most colorful of the cover's
+// five colors (its quarters and the whole), once per artwork. A white wall behind a pink subject has the wall as the
+// whole's color, too gray to give an accent.
 static void followCover(UIImage *image, NSString *identity) {
     static NSString *followed;
     if (!SGRPlayerFollowsCover() || !image || (identity && [identity isEqualToString:followed])) return;
     followed = identity;
-    [SGRPalette paletteForImage:image request:(SGRPaletteRequest){.flow = YES} completion:^(SGRPalette *palette) {
+    [SGRPalette paletteForImage:image request:(SGRPaletteRequest){.mainColor = YES, .flow = YES} completion:^(SGRPalette *palette) {
         UIColor *best = nil;
         CGFloat bestSaturation = -1;
+        CGFloat ph = 0, ps = 0, pv = 0, pa = 1;
+        if (palette.primaryColor && [palette.primaryColor getHue:&ph saturation:&ps brightness:&pv alpha:&pa] && ps >= 0.25) {
+            best = palette.primaryColor;
+            bestSaturation = ps;
+        }
         for (UIColor *color in palette.flowColors) {
             CGFloat h, saturation, v, a;
             if ([color getHue:&h saturation:&saturation brightness:&v alpha:&a] && saturation > bestSaturation) {
@@ -96,6 +102,7 @@ static SGRArtworkField *fieldIn(UIView *plane) {
     if (field) return field;
     field = [[SGRArtworkField alloc] initWithFrame:plane.bounds];
     field.showsBackdrop = YES;
+    field.mainColor = YES;
     SGRPlayerBackgroundKind background = SGRPlayerBackground();
     field.flows = background == SGRPlayerBackgroundColours;
     field.fluid = background >= SGRPlayerBackgroundFluid;
