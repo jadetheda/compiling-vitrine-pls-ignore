@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>UIDesignRequiresCompatibility</key>
+	<false/>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
+	<key>MusicHapticsSupported</key>
+	<true/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_spotify-ln-check._tcp</string>
+		<string>_spotify-connect._tcp</string>
+		<string>_googlecast._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Find nearby speakers and devices for Spotify Connect and Cast.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>AirPods gestures and Spatial voice read how your head moves, so a double nod can like a song, a shake can skip it, and Karaoke's voice can stay in front of you as you turn.</string>
+</dict>
+</plist>

@@ -1,0 +1,29 @@
+*.ipa
+*.mobileprovision
+*.p12
+.DS_Store
+.signing.env
+Developer/
+Distribution/
+Password*.txt
+__pycache__/
+out/
+trees/*.txt
+tweak/.theos/
+tweak/obj/
+tweak/packages/
+tweak/Sources/Shared/Flags/SGFlagList.m
+tweak/Sources/App/Onboarding/SGWhatsNewNotes.h
+/trees/continuous
+/trees/clean
+harness/**/build/
+vendor/*/build/
+/video
+
+# Local research and clean-room specs, kept with the repo but never published.
+notes/
+
+# zsign's signature cache, from signing out/quick/ in place
+.zsign_cache/
+.phone.env
+.claude/worktrees/
