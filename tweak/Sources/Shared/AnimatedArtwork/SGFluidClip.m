@@ -106,9 +106,9 @@ static CGImageRef newBlurred(CGImageRef cover) CF_RETURNS_RETAINED {
             g = MIN(1.0, g * ratio);
             b = MIN(1.0, b * ratio);
         }
-        p[0] = (uint8_t)lround(r * 255.0);
-        p[1] = (uint8_t)lround(g * 255.0);
-        p[2] = (uint8_t)lround(b * 255.0);
+        p[0] = (uint8_t)MIN(255, MAX(0, lround(r * 255.0)));
+        p[1] = (uint8_t)MIN(255, MAX(0, lround(g * 255.0)));
+        p[2] = (uint8_t)MIN(255, MAX(0, lround(b * 255.0)));
         lightSum += relativeLuminanceClip(p[0] / 255.0, p[1] / 255.0, p[2] / 255.0);
     }
     double meanLight = count > 0 ? lightSum / (double)count : 0;
@@ -116,9 +116,9 @@ static CGImageRef newBlurred(CGImageRef cover) CF_RETURNS_RETAINED {
         double scaleLight = pow(kLightCeiling / meanLight, 1.0 / 2.2);
         for (size_t i = 0; i < count; i++) {
             uint8_t *p = pixels + i * 4;
-            p[0] = (uint8_t)lround(p[0] * scaleLight);
-            p[1] = (uint8_t)lround(p[1] * scaleLight);
-            p[2] = (uint8_t)lround(p[2] * scaleLight);
+            p[0] = (uint8_t)MIN(255, MAX(0, lround(p[0] * scaleLight)));
+            p[1] = (uint8_t)MIN(255, MAX(0, lround(p[1] * scaleLight)));
+            p[2] = (uint8_t)MIN(255, MAX(0, lround(p[2] * scaleLight)));
         }
     }
     CGImageRef saturated = CGBitmapContextCreateImage(context);

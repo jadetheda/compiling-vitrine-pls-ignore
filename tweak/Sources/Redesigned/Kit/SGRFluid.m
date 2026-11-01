@@ -104,7 +104,7 @@ static inline BOOL isBlackOrWhiteByte(uint8_t r, uint8_t g, uint8_t b) {
 // do not inject muddy patches into the blurred backdrop.
 static void conditionSourceBitmap(uint8_t *px, size_t width, size_t height, CGFloat outEdgeRGB[3], CGFloat *outDominance) {
     enum { kBuckets = 512 };
-    uint16_t keys[kBuckets];
+    uint16_t keys[kBuckets] = {0};
     BOOL used[kBuckets] = {0};
     double sumR[kBuckets] = {0}, sumG[kBuckets] = {0}, sumB[kBuckets] = {0};
     size_t counts[kBuckets] = {0};
@@ -116,7 +116,12 @@ static void conditionSourceBitmap(uint8_t *px, size_t width, size_t height, CGFl
             const uint8_t *p = px + (y * width + x) * 4;
             uint16_t key = (uint16_t)(((p[0] >> 3) << 10) | ((p[1] >> 3) << 5) | (p[2] >> 3));
             size_t slot = (key * 40503u) & (kBuckets - 1);
-            while (used[slot] && keys[slot] != key) slot = (slot + 1) & (kBuckets - 1);
+            size_t probes = 0;
+            while (used[slot] && keys[slot] != key) {
+                slot = (slot + 1) & (kBuckets - 1);
+                if (++probes >= kBuckets) break;
+            }
+            if (probes >= kBuckets) continue;
             used[slot] = YES;
             keys[slot] = key;
             counts[slot]++;
@@ -259,8 +264,8 @@ static void sampleBlurred5Tap(const uint8_t *src, size_t width, size_t height, C
 
     for (int c = 0; c < 3; c++) {
         outRGB[c] = c0[c] * kGaussW0
-                  + (cx1[c] + cx2[c] + cy1[c] + cy2[c]) * (kGaussW1 * 0.25)
-                  + (cx3[c] + cx4[c] + cy3[c] + cy4[c]) * (kGaussW2 * 0.25);
+                  + (cx1[c] + cx2[c] + cy1[c] + cy2[c]) * (kGaussW1 * 0.5)
+                  + (cx3[c] + cx4[c] + cy3[c] + cy4[c]) * (kGaussW2 * 0.5);
     }
 }
 

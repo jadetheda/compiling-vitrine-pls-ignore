@@ -262,7 +262,7 @@ static int compareClustersByScoreDesc(const void *a, const void *b) {
 // Extracts quantized RGB555 clusters over a pixel region (or perimeter P_edge when perimeterOnly is YES).
 static size_t extractClusters(const uint8_t *px, size_t width, size_t height, BOOL perimeterOnly, SGRColorCluster *outClusters, size_t maxClusters) {
     enum { kHashSize = 2048 };
-    uint16_t keys[kHashSize];
+    uint16_t keys[kHashSize] = {0};
     BOOL occupied[kHashSize] = {0};
     double sumR[kHashSize] = {0}, sumG[kHashSize] = {0}, sumB[kHashSize] = {0}, scores[kHashSize] = {0};
     size_t counts[kHashSize] = {0};
@@ -278,9 +278,12 @@ static size_t extractClusters(const uint8_t *px, size_t width, size_t height, BO
             CGFloat b = p[3] < 255 ? MIN(255.0, p[2] * 255.0 / p[3]) : p[2];
             uint16_t bucketKey = (uint16_t)((((int)r >> 3) << 10) | (((int)g >> 3) << 5) | ((int)b >> 3));
             size_t slot = (bucketKey * 40503u) & (kHashSize - 1);
+            size_t probes = 0;
             while (occupied[slot] && keys[slot] != bucketKey) {
                 slot = (slot + 1) & (kHashSize - 1);
+                if (++probes >= kHashSize) break;
             }
+            if (probes >= kHashSize) continue;
             occupied[slot] = YES;
             keys[slot] = bucketKey;
             counts[slot]++;

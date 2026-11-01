@@ -14,12 +14,16 @@ DEV_ICON ?= docs/icon.png
 
 .PHONY: build release install quick trees session log flags
 build:    ## FLEX + glass IPA into out/
+	@chmod +x scripts/*.sh scripts/*.py 2>/dev/null || true
 	./scripts/pipeline.sh $(IPA)
 release:  ## glass only, no FLEX
+	@chmod +x scripts/*.sh scripts/*.py 2>/dev/null || true
 	./scripts/pipeline.sh $(IPA) --no-flex
 install:  ## build, sign with your certificate, push to the phone on USB (FLEX=1 to take FLEX too)
+	@chmod +x scripts/*.sh scripts/*.py 2>/dev/null || true
 	./scripts/pipeline.sh $(IPA) --install $(FLEX_ARG) --name "$(DEV_NAME)" --icon "$(DEV_ICON)" -o out/spoti.dev.ipa
 quick:    ## a tweak-only change into the app the last build made: rebuild, sign, install in seconds
+	@chmod +x scripts/*.sh scripts/*.py 2>/dev/null || true
 	./scripts/quick.sh
 trees:    ## record per-screen view trees into trees/ (needs a FLEX build on the phone)
 	./scripts/record-trees.py

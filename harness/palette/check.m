@@ -46,15 +46,21 @@ int main(void) {
             fails++;
         }
 
-        for (int main = 0; main < 2; main++) {
-            SGRPaletteRequest request = {CGSizeZero, NO, YES, main != 0, main != 0};
+        for (int isMain = 0; isMain < 2; isMain++) {
+            SGRPaletteRequest request = (SGRPaletteRequest){
+                .backdropSize = CGSizeZero,
+                .dissolve = NO,
+                .amoled = YES,
+                .flow = (isMain != 0),
+                .mainColor = (isMain != 0),
+            };
             [SGRPalette paletteForImage:cover() request:request completion:^(SGRPalette *palette) {
                 CGFloat r, g, b, a;
                 [palette.fieldColor getRed:&r green:&g blue:&b alpha:&a];
                 BOOL blue = b > r + 0.05 && b > g;
-                printf("%s: field %.3f %.3f %.3f, %s\n", main ? "main color" : "bottom edge", r, g, b, blue ? "blue" : "gray");
-                if (blue != (BOOL)main) fails++;
-                if (main && (!palette.backgroundColor || !palette.primaryColor || palette.flowColors.count != 5)) {
+                printf("%s: field %.3f %.3f %.3f, %s\n", isMain ? "main color" : "bottom edge", r, g, b, blue ? "blue" : "gray");
+                if (blue != (BOOL)isMain) fails++;
+                if (isMain && (!palette.backgroundColor || !palette.primaryColor || palette.flowColors.count != 5)) {
                     printf("FAIL: MPArtworkColorAnalyzer properties missing on main request\n");
                     fails++;
                 }
