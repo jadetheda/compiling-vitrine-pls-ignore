@@ -12,13 +12,18 @@ on:
         default: artifacts
         type: choice
         options: [artifacts, filebin, both]
+      runner:
+        description: "GitHub Actions runner image"
+        default: macos-15-intel
+        type: choice
+        options: [macos-15-intel, macos-15, macos-latest]
 
 env:
   THEOS: ${{ github.workspace }}/theos
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
     steps:
       - uses: actions/checkout@v5
 
