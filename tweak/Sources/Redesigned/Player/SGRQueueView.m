@@ -4,6 +4,7 @@
 #import "Shared/AdBlock/Protobuf.h"
 #import "Shared/ArtistBlock/ArtistBlock.h"
 #import "Shared/AutoMix/AutoMix.h"
+#import "Shared/Fonts/Fonts.h"
 #import "Shared/LocalFiles/LocalFiles.h"
 #import "Shared/Lyrics/Lyrics.h"
 #import "Shared/LyricsSources/LyricsSources.h"
@@ -41,6 +42,23 @@
 
 static NSNotificationName const SGRQueueSessionDidUpdateNotification = @"SGRQueueSessionDidUpdateNotification";
 static NSNotificationName const SGRQueuePillsDidChangeNotification = @"SGRQueuePillsDidChangeNotification";
+
+// A font that follows the app font setting (Shared/Fonts). When the default Spotify font is chosen the
+// UIFont hooks are inactive, so systemFontOfSize: would return SF Pro while Spotify's own views show
+// Spotify Mix; ask for the family by name with the weight as a trait, the way Spotify's own views do
+// (Spotify Mix is a variable font, so the weight axis renders any weight from one face). For any other
+// setting the Designs hooks intercept systemFontOfSize:weight: and apply the chosen design, so that
+// path is taken directly.
+static UIFont *SGRQueueFont(CGFloat size, UIFontWeight weight) {
+    if (SGAppFontChosen() == SGAppFontSpotify) {
+        UIFontDescriptor *descriptor = [UIFontDescriptor fontDescriptorWithFontAttributes:@{
+            UIFontDescriptorFamilyAttribute: @"Spotify Mix UI",
+            UIFontDescriptorTraitsAttribute: @{UIFontWeightTrait: @(weight)},
+        }];
+        return [UIFont fontWithDescriptor:descriptor size:size];
+    }
+    return [UIFont systemFontOfSize:size weight:weight];
+}
 
 NSArray<NSString *> *SGRQueuePillNames(void) {
     return @[
@@ -2101,7 +2119,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
     [_rowContentView addSubview:_artView];
 
     _titleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _titleLabel.font = [UIFont systemFontOfSize:16.5 weight:UIFontWeightRegular];
+    _titleLabel.font = SGRQueueFont(16.5, UIFontWeightRegular);
     _titleLabel.textColor = UIColor.whiteColor;
     _titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [_rowContentView addSubview:_titleLabel];
@@ -2113,7 +2131,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
     [_rowContentView addSubview:_explicitView];
 
     _subtitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _subtitleLabel.font = [UIFont systemFontOfSize:13.8 weight:UIFontWeightRegular];
+    _subtitleLabel.font = SGRQueueFont(13.8, UIFontWeightRegular);
     _subtitleLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
     _subtitleLabel.layer.compositingFilter = @"plusL";
     _subtitleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -2771,12 +2789,12 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
     [_nowPlayingCard addSubview:_npDetailsView];
 
     _npTitleLabel = [[SGMarqueeLabel alloc] initWithFrame:CGRectZero];
-    _npTitleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold];
+    _npTitleLabel.font = SGRFont(UIFontTextStyleTitle3, UIFontWeightBold, UIContentSizeCategoryExtraLarge);
     _npTitleLabel.textColor = UIColor.whiteColor;
     [_npDetailsView addSubview:_npTitleLabel];
 
     _npArtistLabel = [[SGMarqueeLabel alloc] initWithFrame:CGRectZero];
-    _npArtistLabel.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightRegular];
+    _npArtistLabel.font = SGRFont(UIFontTextStyleCallout, UIFontWeightRegular, UIContentSizeCategoryExtraLarge);
     _npArtistLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.62];
     _npArtistLabel.layer.compositingFilter = @"plusL";
     [_npDetailsView addSubview:_npArtistLabel];
@@ -2832,7 +2850,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 
     _addSongsLabel = [[UILabel alloc] initWithFrame:CGRectZero];
     _addSongsLabel.attributedText = [[NSAttributedString alloc] initWithString:@"Add Songs to Queue" attributes:@{
-        NSFontAttributeName: [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular],
+        NSFontAttributeName: SGRQueueFont(17.0, UIFontWeightRegular),
         NSForegroundColorAttributeName: UIColor.whiteColor,
         NSKernAttributeName: @(-0.35),
     }];
@@ -2877,7 +2895,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
     [_continueHeaderView addSubview:_continueTitleLabel];
 
     _continueSubtitleLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    _continueSubtitleLabel.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular];
+    _continueSubtitleLabel.font = SGRQueueFont(13.0, UIFontWeightRegular);
     _continueSubtitleLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
     _continueSubtitleLabel.layer.compositingFilter = @"plusL";
     _continueSubtitleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -2889,7 +2907,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
     _emptyQueuePromptLabel.hidden = YES;
     _emptyQueuePromptLabel.layer.compositingFilter = @"plusL";
 
-    UIFont *promptFont = [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular];
+    UIFont *promptFont = SGRQueueFont(17.0, UIFontWeightRegular);
     UIColor *promptColor = [UIColor colorWithWhite:1.0 alpha:0.55];
     NSMutableAttributedString *promptStr = [[NSMutableAttributedString alloc] initWithString:@"To keep music playing, turn on\n"
                                                                                   attributes:@{NSFontAttributeName: promptFont, NSForegroundColorAttributeName: promptColor}];
@@ -2912,7 +2930,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 - (UILabel *)createSectionTitleLabelWithText:(NSString *)text {
     UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
     label.attributedText = [[NSAttributedString alloc] initWithString:text attributes:@{
-        NSFontAttributeName: [UIFont systemFontOfSize:17.0 weight:UIFontWeightBold],
+        NSFontAttributeName: SGRQueueFont(17.0, UIFontWeightBold),
         NSForegroundColorAttributeName: UIColor.whiteColor,
         NSKernAttributeName: @(-0.40),
     }];
@@ -2922,7 +2940,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 - (UIButton *)createSectionClearButtonWithAction:(SEL)action {
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
     [btn setTitle:@"Clear" forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont systemFontOfSize:17.0 weight:UIFontWeightRegular];
+    btn.titleLabel.font = SGRQueueFont(17.0, UIFontWeightRegular);
     [btn setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.65] forState:UIControlStateNormal];
     [btn setTitleColor:[UIColor colorWithWhite:1.0 alpha:0.35] forState:UIControlStateHighlighted];
     btn.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
@@ -3178,13 +3196,12 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
 
 - (void)updateNowPlayingCardWithItem:(SGRQueueItem *)item subtitle:(NSString *)subtitle {
     NSString *titleText = item.title.length ? item.title : @"Not Playing";
-    CGFloat titleFontSize = _landscapeMode ? 18.5 : 17.0;
-    UIFontWeight titleWeight = _landscapeMode ? UIFontWeightBold : UIFontWeightSemibold;
+    UIFont *npTitleFont = SGRFont(UIFontTextStyleTitle3, UIFontWeightBold, UIContentSizeCategoryExtraLarge);
     NSString *titleKey = [NSString stringWithFormat:@"%@|%d|%d", titleText, item.isExplicit ? 1 : 0, _landscapeMode ? 1 : 0];
     if (![_lastNPTitleKey isEqualToString:titleKey]) {
         _lastNPTitleKey = [titleKey copy];
         _npTitleLabel.attributedText = [[NSAttributedString alloc] initWithString:titleText attributes:@{
-            NSFontAttributeName: [UIFont systemFontOfSize:titleFontSize weight:titleWeight],
+            NSFontAttributeName: npTitleFont,
             NSForegroundColorAttributeName: UIColor.whiteColor,
             NSKernAttributeName: @(-0.40),
         }];
@@ -3205,13 +3222,13 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
             }
         }
     }
-    CGFloat artistFontSize = _landscapeMode ? 17.0 : 15.0;
-    CGFloat artistKern = _landscapeMode ? -0.35 : -0.24;
     NSString *artistKey = [NSString stringWithFormat:@"%@|%d", artistText, _landscapeMode ? 1 : 0];
     if (![_lastNPArtistKey isEqualToString:artistKey]) {
         _lastNPArtistKey = [artistKey copy];
+        UIFont *npArtistFont = SGRFont(UIFontTextStyleCallout, UIFontWeightRegular, UIContentSizeCategoryExtraLarge);
+        CGFloat artistKern = _landscapeMode ? -0.35 : -0.24;
         _npArtistLabel.attributedText = [[NSAttributedString alloc] initWithString:artistText attributes:@{
-            NSFontAttributeName: [UIFont systemFontOfSize:artistFontSize weight:UIFontWeightRegular],
+            NSFontAttributeName: npArtistFont,
             NSForegroundColorAttributeName: [UIColor colorWithWhite:1.0 alpha:0.62],
             NSKernAttributeName: @(artistKern),
         }];
@@ -4093,7 +4110,7 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
     lbl.textAlignment = NSTextAlignmentCenter;
     lbl.userInteractionEnabled = NO;
     lbl.attributedText = [[NSAttributedString alloc] initWithString:title attributes:@{
-        NSFontAttributeName: [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold],
+        NSFontAttributeName: SGRQueueFont(17.0, UIFontWeightSemibold),
         NSForegroundColorAttributeName: color,
         NSKernAttributeName: @(-0.35),
     }];
@@ -4274,7 +4291,7 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
     pStyle.lineSpacing = 1.67;
     pStyle.alignment = NSTextAlignmentLeft;
     _clearPromptTitleLabel.attributedText = [[NSAttributedString alloc] initWithString:promptText attributes:@{
-        NSFontAttributeName: [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold],
+        NSFontAttributeName: SGRQueueFont(17.0, UIFontWeightSemibold),
         NSForegroundColorAttributeName: UIColor.whiteColor,
         NSKernAttributeName: @(-0.43),
         NSParagraphStyleAttributeName: pStyle,
@@ -4283,7 +4300,7 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
     NSString *confirmTitle = isHistory ? @"Clear" : @"Clear Queue";
     UIColor *coralColor = [UIColor colorWithRed:238.0/255.0 green:120.0/255.0 blue:121.0/255.0 alpha:1.0];
     _clearPromptConfirmLabel.attributedText = [[NSAttributedString alloc] initWithString:confirmTitle attributes:@{
-        NSFontAttributeName: [UIFont systemFontOfSize:17.0 weight:UIFontWeightSemibold],
+        NSFontAttributeName: SGRQueueFont(17.0, UIFontWeightSemibold),
         NSForegroundColorAttributeName: coralColor,
         NSKernAttributeName: @(-0.35),
     }];
@@ -4748,19 +4765,19 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
 
     UILabel *l1 = [[UILabel alloc] initWithFrame:CGRectMake(82.0, 16.0, 140.0, 19.0)];
     l1.text = item.title.length ? item.title : @"Track";
-    l1.font = [UIFont systemFontOfSize:15.0 weight:UIFontWeightSemibold];
+    l1.font = SGRQueueFont(15.0, UIFontWeightSemibold);
     l1.textColor = UIColor.whiteColor;
     [vc.view addSubview:l1];
 
     UILabel *l2 = [[UILabel alloc] initWithFrame:CGRectMake(82.0, 35.0, 140.0, 17.0)];
     l2.text = item.artist ?: @"";
-    l2.font = [UIFont systemFontOfSize:13.5 weight:UIFontWeightRegular];
+    l2.font = SGRQueueFont(13.5, UIFontWeightRegular);
     l2.textColor = [UIColor colorWithWhite:1.0 alpha:0.90];
     [vc.view addSubview:l2];
 
     UILabel *l3 = [[UILabel alloc] initWithFrame:CGRectMake(82.0, 52.0, 140.0, 16.0)];
     l3.text = item.albumTitle ?: @"";
-    l3.font = [UIFont systemFontOfSize:13.0 weight:UIFontWeightRegular];
+    l3.font = SGRQueueFont(13.0, UIFontWeightRegular);
     l3.textColor = [UIColor colorWithWhite:1.0 alpha:0.55];
     [vc.view addSubview:l3];
 
