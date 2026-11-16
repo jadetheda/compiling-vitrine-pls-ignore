@@ -217,9 +217,9 @@ static const SGAIProvider kProviders[] = {
     {@"gemini", @"Gemini", @"Google", @"Vitrine.Gemini",
      @"Translate with Gemini sends the song's lyrics to Google, on your own key from Google AI Studio. The key stays on this iPhone.",
      @"Answer with a JSON array of the {count} translations as strings.",
-     // Default to Gemini 4 Hydrogen (highest lyric/idiom accuracy on free-tier keys with thinkingLevel=low),
-     // followed by 3.6 Flash (fastest reliable GA Flash), 3 Flash Preview, and 3.5 Flash Lite (fastest overall).
-     {@"gemini-4-hydrogen", @"gemini-3.6-flash", @"gemini-3-flash-preview", @"gemini-3.5-flash-lite"}, {@"4 Hydrogen (Recommended)", @"3.6 Flash", @"3 Flash Preview", @"3.5 Flash Lite"},
+     // Default to Gemini 4 Hydrogen (highest lyric/idiom accuracy with thinkingLevel=low; tight RPM burst limit),
+     // followed by 3.1 Flash Lite (fastest reliable thinking Flash), 3 Flash Preview, and 3.6 Flash (20 RPD free-tier cap).
+     {@"gemini-4-hydrogen", @"gemini-3.1-flash-lite", @"gemini-3-flash-preview", @"gemini-3.6-flash"}, {@"4 Hydrogen (Recommended)", @"3.1 Flash Lite", @"3 Flash Preview", @"3.6 Flash"},
      YES, {@"thinking"}, geminiRequest, geminiAnswer},
     {@"openai", @"OpenAI-compatible", nil, @"Vitrine.OpenAI",
      @"Sends the song's lyrics to the server below: OpenAI's own unless you name another, such as OpenRouter, or an "
@@ -1263,17 +1263,19 @@ static NSInteger geminiModelWeightRank(NSString *modelID) {
     static NSArray<NSString *> *ordered;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        // Quality & reliability first from live lyric benchmarks:
-        // 4 Hydrogen leads idiom/poetic nuance (30/30 lines, free-tier compatible); 3 Flash Preview closely follows
-        // on idioms; 3.6 Flash is the fastest reliable GA Flash (30/30 in ~2.2s); then 3.5 Flash, Lite, and stalling models.
+        // Ordered from live lyric benchmarks on v1beta/generateContent (thinkingLevel=low):
+        // 4 Hydrogen leads idiom/poetic nuance (exact line count, tight per-minute burst limit on free tier);
+        // 3.1 Flash Lite is the fastest reliable Flash (thinks briefly, preserves line counts, generous free-tier quota);
+        // 3 Flash Preview follows on nuance; 3.6/3.5 Flash are capped at 20 RPD on the free tier;
+        // 3.5 Flash Lite / latest run with 0 thinking tokens and can drop lines; 3.7/3.8 Flash stall.
         ordered = @[
             @"gemini-4-hydrogen",
+            @"gemini-3.1-flash-lite",
+            @"gemini-3.1-flash-lite-preview",
             @"gemini-3-flash-preview",
             @"gemini-3.6-flash",
             @"gemini-3.5-flash",
             @"gemini-3.5-flash-lite",
-            @"gemini-3.1-flash-lite",
-            @"gemini-3.1-flash-lite-preview",
             @"gemini-flash-lite-latest",
             @"gemini-3.7-flash",
             @"gemini-flash-latest"
@@ -1306,7 +1308,7 @@ static void processFetchedGeminiModels(NSArray *models, const SGAIProvider *p) {
         if (![lower containsString:@"flash"] && ![lower containsString:@"hydrogen"]) continue;
         if ([lower containsString:@"tts"] || [lower containsString:@"image"] || [lower containsString:@"banana"] ||
             [lower containsString:@"audio"] || [lower containsString:@"omni"] || [lower containsString:@"transcribe"] ||
-            [lower containsString:@"realtime"]) continue;
+            [lower containsString:@"realtime"] || [lower containsString:@"live"]) continue;
         // Hide defunct (404) models permanently unavailable to users:
         if ([lower containsString:@"2.5"]) continue;
         // model() puts a stored 3.8 Flash back to the default, so a pick of it would not hold: it is not offered.
