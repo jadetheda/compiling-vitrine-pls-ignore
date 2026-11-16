@@ -367,7 +367,7 @@ UIViewController *SGRPlayerSettingsPage(NSArray *more) {
                        @"Follow the cover paints the like, shuffle, repeat, device and queue buttons, and the mini player's device and like, in the color of the song playing. "
                        @"Spotify's icons keeps Spotify's own glyphs in the row under the controls instead of the Music app's."),
         SGNotedSection(@"Mini player", SGRNowPlayingBarRows(),
-                       @"Apple Music style moves the now playing bar in between two tabs as you scroll down."), nil];
+                       @"Minimize on scroll moves the mini player between the tabs as you scroll down. For the complete Apple Music look, turn on both Compact mini player here and Compact tab bar in Mod Settings > Tab bar."), nil];
     [sections addObjectsFromArray:more];
     // Fluid, Animated and Visualizer share the field (PlayerMotion.x reads the choice on every track, PlayerVisualiser.m
     // on the field's layout); Still and Colors are a field of another kind, made once a launch (PlayerField.x).

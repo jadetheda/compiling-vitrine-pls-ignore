@@ -12,9 +12,20 @@
 // default the row has the cover, the title and play alone, as the Music app's. Read each time the card goes
 // into the row, so a change shows the next time the bar minimizes.
 #define SGRKeyBarInlineConnect @"spotifyglass.redesign.nowPlayingBar.inlineConnect"
+// 48 pt card height with 32 pt rounded-square artwork, matching the compact proportions of the Music app.
+#define SGRKeyBarCompact @"spotifyglass.redesign.bar.compact"
+// Whether the next track button on the mini player is enabled (on by default when compact is enabled).
+#define SGRKeyBarNextButton @"spotifyglass.redesign.nowPlayingBar.nextButton"
+BOOL SGRIsBarNextButtonEnabled(void);
+// The artwork shape on the now playing card: rounded square (Apple Music) or circle (upstream).
+typedef NS_ENUM(NSInteger, SGRBarArtworkShape) {
+    SGRBarArtworkShapeRoundedSquare = 0,
+    SGRBarArtworkShapeCircle = 1,
+};
+#define SGRKeyBarArtworkShape @"spotifyglass.redesign.nowPlayingBar.artworkShape"
 
-// The bar's rows, the Mini player section of the Player page (Redesigned/Player/PlayerSettings.m): Apple
-// Music style (the tab bar's Minimize on scroll, Redesigned/Navbar/Navbar.h), the device button in that
+// The bar's rows, the Mini player section of the Player page (Redesigned/Player/PlayerSettings.m):
+// Minimize on scroll (Redesigned/Navbar/Navbar.h), the device button in that
 // row, and the device button hidden on the full card.
 NSArray<SGModRow *> *SGRNowPlayingBarRows(void);
 
@@ -27,6 +38,9 @@ CGRect SGRNowPlayingArtworkFrameIn(UIView *host);
 // Lays the bar out again at once, into the minimized tab bar's slot or back above the bar
 // (Navbar.h's SGRTabBarInlineSlot); TabBar.x calls it inside its own animation.
 void SGRNowPlayingBarFollowTabBar(void);
+// Interactive pre-minimize scroll progress (0 at rest, 1 at the minimize threshold): scales the expanded
+// bar card slightly down with the tab bar as the user gently scrolls down before crossing the threshold.
+void SGRNowPlayingBarSetScrollSquish(CGFloat progress);
 // The player's morph keeps the real tab bar where it is and drops Spotify's tab bar stand-in (BarTransition.x).
 void SGRTabBarStandInDropped(UIView *standIn);
 // How far the bar stands below where Spotify puts it, in the minimized tab bar's row; 0 with the tab bar expanded. The

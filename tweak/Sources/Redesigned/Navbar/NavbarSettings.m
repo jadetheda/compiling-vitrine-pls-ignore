@@ -149,8 +149,8 @@ typedef NS_ENUM(NSInteger, SGRSplitSection) {
     _intro = SGNote(SGRLegacyTabBarOn()
                     ? @"The tab here sits apart from the others at the right end of the bar, the way the Music "
                        "app sets Search apart. Only one can: adding another replaces it. It is not on the bar's own list."
-                    : @"Tabs here sit apart from the others at the right end of the bar, the way the Music "
-                       "app sets Search apart. They are not on the bar's own list.");
+                    : @"Tabs here sit apart from the others at the right end of the bar, as on iPadOS. "
+                       "On iPhone, leaving tabs together in the main list gives Apple Music's unified floating bar.");
     self.tableView.tableHeaderView = _intro;
     [self load];
 }
@@ -336,12 +336,26 @@ static UITabBar *previewBar(void) {
     bar.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     bar.userInteractionEnabled = NO;
     bar.tintColor = SGRAccent();
+    bar.itemPositioning = UITabBarItemPositioningFill;
     return bar;
 }
 
 // TabBar.x's split bar: UIKit draws a bar's platter 21 pt in from its sides, a split tab takes a 62 pt circle,
 // and the main bar runs under the split bar's leading inset to leave 12 pt between the two platters.
 static const CGFloat kPlatterInset = 21, kApartItemWidth = 62, kPlatterGap = 12;
+
+static NSDictionary *autoSplitEntryIn(NSArray<NSDictionary *> *entries) {
+    if (entries.count < 2) return nil;
+    for (NSDictionary *entry in [entries reverseObjectEnumerator]) {
+        NSString *ident = [entry[SGRNavbarID] isKindOfClass:NSString.class] ? [entry[SGRNavbarID] lowercaseString] : @"";
+        NSString *title = [entry[SGRNavbarTitle] isKindOfClass:NSString.class] ? [entry[SGRNavbarTitle] lowercaseString] : @"";
+        NSString *icon = [entry[SGRNavbarIcon] isKindOfClass:NSString.class] ? [entry[SGRNavbarIcon] lowercaseString] : @"";
+        if ([ident isEqualToString:@"search"] || [title isEqualToString:@"search"] || [icon hasPrefix:@"search"]) {
+            return entry;
+        }
+    }
+    return entries.lastObject;
+}
 
 // The glass bar as it will look, drawn by the same system UITabBar TabBar.x puts over Spotify's bar, from the
 // list as it stands on the page: the shown tabs in order, the first selected, the split tabs on a bar of
@@ -377,7 +391,7 @@ static NSArray<UITabBarItem *> *itemsFor(NSArray<NSDictionary *> *entries, BOOL 
 
 // What Navbar.x composes from the same list: with nothing left shown, Spotify's own tabs come back.
 - (void)showEntries:(NSArray<NSDictionary *> *)entries {
-    BOOL custom = SGEnabled(SGRKeyNavbar), names = !SGHidden(SGRKeyNavbarHideLabels);
+    BOOL custom = SGEnabled(SGRKeyNavbar), names = !SGHidden(SGRKeyNavbarHideLabels), autoSplit = SGEnabled(SGRKeyNavbarAutoSplit);
     NSMutableArray<NSDictionary *> *shown = [NSMutableArray array];
     if (custom) for (NSDictionary *entry in entries) if (![entry[SGRNavbarHidden] boolValue]) [shown addObject:entry];
     if (!shown.count) [shown addObjectsFromArray:stockEntries()];
@@ -385,6 +399,13 @@ static NSArray<UITabBarItem *> *itemsFor(NSArray<NSDictionary *> *entries, BOOL 
     NSMutableArray<NSDictionary *> *main = [NSMutableArray array], *apart = [NSMutableArray array];
     for (NSDictionary *entry in shown) if (![splitStock containsObject:entry[SGRNavbarID]]) [main addObject:entry];
     if (custom) [apart addObjectsFromArray:SGRNavbarSplit()];
+    if (!apart.count && autoSplit && main.count >= 2) {
+        NSDictionary *trailing = autoSplitEntryIn(main);
+        if (trailing) {
+            [main removeObjectIdenticalTo:trailing];
+            [apart addObject:trailing];
+        }
+    }
     // The fallback bar folds the split tab into the capsule when the bar is this short (TabBarLegacy.x).
     // The split tab stands where the tab list puts it, as on the bar.
     if (SGRLegacyTabBarOn() && main.count && apart.count && main.count + apart.count <= SGRLegacyFoldLimit) {
@@ -552,6 +573,7 @@ static const CGFloat kPictureHeight = 76;
 typedef NS_ENUM(NSInteger, SGRNavbarSection) {
     SGRNavbarSectionSwitch,
     SGRNavbarSectionLabels,
+    SGRNavbarSectionCompact,
     SGRNavbarSectionTabs,
     SGRNavbarSectionLinks,   // Add a tab, Use Spotify's tabs
     SGRNavbarSectionSplit,
@@ -675,6 +697,7 @@ typedef NS_ENUM(NSInteger, SGRNavbarSection) {
 }
 
 - (NSInteger)tableView:(UITableView *)table numberOfRowsInSection:(NSInteger)section {
+    if (section == SGRNavbarSectionCompact) return 2;
     if (section == SGRNavbarSectionTabs) return (NSInteger)_entries.count;
     // Tabs in the accent, under the switch, for the capsule bar below iOS 26 only: iOS 26's bar is the system's.
     if (section == SGRNavbarSectionSwitch) return SGRLegacyTabBarOn() ? 2 : 1;
@@ -682,12 +705,15 @@ typedef NS_ENUM(NSInteger, SGRNavbarSection) {
 }
 
 - (NSString *)headerFor:(NSInteger)section {
+    if (section == SGRNavbarSectionCompact) return @"Minimize";
     return section == SGRNavbarSectionTabs ? @"Tabs" : nil;
 }
 
 - (NSString *)footerFor:(NSInteger)section {
     if (section == SGRNavbarSectionSwitch && !SGEnabled(SGRKeyNavbar))
         return @"Off, the bar shows Spotify's own tabs in Spotify's order. Your list is kept for when it is on again.";
+    if (section == SGRNavbarSectionCompact)
+        return @"Sizes the minimized tab bar to Apple Music's 48 pt Liquid Glass circles and optionally sets Search apart on the right to sandwich the mini player. Pair with Minimize on scroll and Compact mini player in Mod Settings > Player.";
     if (section == SGRNavbarSectionTabs)
         return @"Drag a tab to move it. Tap one you added to rename it or change its icon, or one of Spotify's to hide it.";
     return nil;
@@ -792,6 +818,28 @@ typedef NS_ENUM(NSInteger, SGRNavbarSection) {
             toggle.on = SGEnabled(SGRKeyNavbar);
             [toggle addTarget:self action:@selector(customToggled:) forControlEvents:UIControlEventValueChanged];
             cell.accessoryView = toggle;
+            break;
+        }
+        case SGRNavbarSectionCompact: {
+            if (path.row == 0) {
+                SGFillCell(cell, @"Compact tab bar", @"48 pt circles and scaled glyphs when minimized", nil, nil);
+                UISwitch *toggle = [UISwitch new];
+                toggle.onTintColor = SGGreen();
+                toggle.on = SGEnabled(SGRKeyNavbarCompact);
+                toggle.accessibilityLabel = @"Compact tab bar";
+                toggle.accessibilityHint = @"48 pt circles and scaled glyphs when minimized";
+                [toggle addTarget:self action:@selector(compactToggled:) forControlEvents:UIControlEventValueChanged];
+                cell.accessoryView = toggle;
+            } else {
+                SGFillCell(cell, @"Split Search when minimized", @"Set Search apart on the right to sandwich the mini player", nil, nil);
+                UISwitch *toggle = [UISwitch new];
+                toggle.onTintColor = SGGreen();
+                toggle.on = SGEnabled(SGRKeyNavbarAutoSplit);
+                toggle.accessibilityLabel = @"Split Search when minimized";
+                toggle.accessibilityHint = @"Set Search apart on the right to sandwich the mini player";
+                [toggle addTarget:self action:@selector(autoSplitToggled:) forControlEvents:UIControlEventValueChanged];
+                cell.accessoryView = toggle;
+            }
             break;
         }
         case SGRNavbarSectionLinks:
@@ -913,7 +961,34 @@ typedef NS_ENUM(NSInteger, SGRNavbarSection) {
     SGSetEnabled(SGRKeyNavbarHideLabels, !card.names);
     [[UISelectionFeedbackGenerator new] selectionChanged];
     SGRRefreshTabBar();
-    [self showChoices];
+    SGRAnimate(SGRMotionBar, ^{
+        [self showChoices];
+        [_preview layoutIfNeeded];
+    }, nil);
+}
+
+- (void)compactToggled:(UISwitch *)toggle {
+    SGSetEnabled(SGRKeyNavbarCompact, toggle.on);
+    SGRRefreshTabBar();
+    [UIView performWithoutAnimation:^{
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:SGRNavbarSectionTabs] withRowAnimation:UITableViewRowAnimationNone];
+    }];
+    SGRAnimate(SGRMotionBar, ^{
+        [self showChoices];
+        [_preview layoutIfNeeded];
+    }, nil);
+}
+
+- (void)autoSplitToggled:(UISwitch *)toggle {
+    SGSetEnabled(SGRKeyNavbarAutoSplit, toggle.on);
+    SGRRefreshTabBar();
+    [UIView performWithoutAnimation:^{
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:SGRNavbarSectionTabs] withRowAnimation:UITableViewRowAnimationNone];
+    }];
+    SGRAnimate(SGRMotionBar, ^{
+        [self showChoices];
+        [_preview layoutIfNeeded];
+    }, nil);
 }
 
 - (void)accentToggled:(UISwitch *)toggle {
@@ -924,7 +999,10 @@ typedef NS_ENUM(NSInteger, SGRNavbarSection) {
 - (void)customToggled:(UISwitch *)toggle {
     SGSetEnabled(SGRKeyNavbar, toggle.on);
     SGRRefreshTabBar();
-    [self showChoices];
+    SGRAnimate(SGRMotionBar, ^{
+        [self showChoices];
+        [_preview layoutIfNeeded];
+    }, nil);
     // After the glass switch's drop has settled (SGModPage.m): the reload puts a new switch in its place.
     NSTimeInterval wait = SGUseLegacyGlass() ? 0.95 : 0;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(wait * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{

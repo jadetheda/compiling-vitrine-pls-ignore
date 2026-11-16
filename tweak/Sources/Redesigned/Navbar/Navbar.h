@@ -7,6 +7,10 @@
 #define SGRKeyNavbar @"spotifyglass.redesign.navbar"
 // Icons only on the glass bar. Off unless set; applies as soon as the bar lays out again.
 #define SGRKeyNavbarHideLabels @"spotifyglass.redesign.navbar.hideLabels"
+// 48 pt circles and scaled glyph proportions on the glass tab bar. On unless set off.
+#define SGRKeyNavbarCompact @"spotifyglass.redesign.navbar.compact"
+// Auto-split trailing tab (Search) on minimize to sandwich the mini player card. On unless set off.
+#define SGRKeyNavbarAutoSplit @"spotifyglass.redesign.navbar.autoSplit"
 
 extern NSString *const SGRNavbarID;      // NSString, the entry's identity
 extern NSString *const SGRNavbarTitle;   // NSString, the name in the settings list and under the icon
@@ -77,10 +81,20 @@ void SGRNavbarForgetTab(void);
 // comes back only at the top of the page or on a tap on its tab (TabBarMinimize.x). The glass bar always does.
 #define SGRKeyNavbarExpandOnScrollUp @"spotifyglass.redesign.navbar.minimize.expandOnScrollUp"
 BOOL SGRTabBarMinimized(void);
+// What the last SGRSetTabBarMinimized call asked for, updated immediately even when the animated layout is
+// deferred to the next run loop turn, so TabBarMinimize.x never mistakes a pending scroll-triggered minimize
+// for an external bar change.
+BOOL SGRTabBarMinimizedTarget(void);
+// YES while TabBar.x or TabBarRoom.m is synchronously laying out the bars or adjusting safe-area room,
+// so TabBarMinimize.x ignores any resulting re-entrant -[UIScrollView setContentOffset:] callbacks.
+BOOL SGRTabBarIsTransitioning(void);
 // TabBar.x lays both bars out for it, the now playing bar in the same animation, at once; asked for inside an
 // animation, on the main queue's next turn (SGRTabBarMinimized changes then too). `animated` NO is a cut, made
 // at once.
 void SGRSetTabBarMinimized(BOOL minimized, BOOL animated);
+// Interactive pre-minimize scroll progress (0 at rest, 1 at the minimize threshold): scales the expanded
+// sandwich slightly down as the user gently scrolls down before crossing the split threshold.
+void SGRSetTabBarScrollSquish(CGFloat progress, BOOL animated);
 // The room between the minimized bar's two tabs, `height` high and centered on them, in `host`'s
 // coordinates: where the now playing card goes. CGRectNull while the bar is not minimized or not on screen.
 CGRect SGRTabBarInlineSlot(UIView *host, CGFloat height);
