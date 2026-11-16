@@ -24,7 +24,7 @@
 #import "Shared/Lyrics/Lyrics.h"
 #import "Player.h"
 
-static const CGFloat kSkipGlyphSize = 32, kPlayGlyphSize = 44;
+static const CGFloat kSkipGlyphSize = 33.5, kPlayGlyphSize = 44.5;
 // A spinner that is still up this long after a state change is buffering, not a track starting.
 static const NSTimeInterval kSpinnerCheck = 0.6;
 
@@ -39,6 +39,11 @@ static CFTimeInterval sg_tappedUntil;
 static BOOL sg_tappedPaused;
 static __weak SGRGlyphView *sg_playGlyph;
 static __weak UIView *sg_controlsHost;
+static __weak UIViewController *sg_durationUnit;
+static __weak UIView *sg_durationHost;
+
+static void updateDurationForQueue(void);
+static void updateTransportPositionsForQueue(UIView *host);
 
 void SGRPlayerVanish(UIView *view) {
     if (!view) return;
@@ -60,6 +65,13 @@ static SGRGlyphView *glyphFor(UIView *owner, NSString *symbol, CGFloat size) {
     if (!glyph) {
         glyph = [[SGRGlyphView alloc] initWithSymbol:symbol pointSize:size weight:UIImageSymbolWeightRegular];
         objc_setAssociatedObject(owner, &kGlyphKey, glyph, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else {
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:size weight:UIImageSymbolWeightRegular];
+        if (![glyph.preferredSymbolConfiguration isEqual:cfg]) {
+            glyph.preferredSymbolConfiguration = cfg;
+            glyph.image = [UIImage systemImageNamed:symbol withConfiguration:cfg];
+            [glyph sizeToFit];
+        }
     }
     return glyph;
 }
@@ -113,6 +125,12 @@ static BOOL isHiddenButton(UIView *view) {
         || (sg_hideRepeat && [identifier isEqualToString:kRepeatID]);
 }
 
+static BOOL isQueueHiddenButton(UIView *view) {
+    if (!SGRPlayerQueueOpen()) return NO;
+    NSString *identifier = view.accessibilityIdentifier;
+    return [identifier isEqualToString:kShuffleID] || [identifier isEqualToString:kRepeatID];
+}
+
 // Spotify also swaps in a new button a moment after the controls lay out (seen for repeat on 9.1.90: the instance
 // found leaves the window 40 ms later and another arrives at alpha 1), with no layout pass after it. The new one is
 // caught as it arrives. The class is an Encore button's, taken from the first one found (`class`, not a KVO class
@@ -124,18 +142,35 @@ static BOOL isHiddenButton(UIView *view) {
 - (void)didMoveToWindow {
     %orig;
     UIView *view = (UIView *)self;
-    if (view.window && isHiddenButton(view) && sg_buttonsHost && [view isDescendantOfView:sg_buttonsHost]) SGRSuppress(view);
+    if (!view.window || !sg_buttonsHost || ![view isDescendantOfView:sg_buttonsHost]) return;
+    if (isHiddenButton(view)) SGRSuppress(view);
+    else if (isQueueHiddenButton(view)) SGRPlayerVanish(view);
+}
+- (void)setAlpha:(CGFloat)alpha {
+    UIView *view = (UIView *)self;
+    if (alpha > 0 && sg_buttonsHost && [view isDescendantOfView:sg_buttonsHost] && isQueueHiddenButton(view)) {
+        %orig(0);
+        view.userInteractionEnabled = NO;
+        view.accessibilityElementsHidden = YES;
+        return;
+    }
+    %orig;
 }
 %end
 %end
 
-static void suppressButton(UIView *button) {
+static void ensureButtonArrivalHook(UIView *button) {
     if (!button) return;
-    SGRSuppress(button);
     static BOOL hooked;
     if (hooked) return;
     hooked = YES;
     %init(SGRPlayerButtonArrival, SGRPlayerButton = button.class);
+}
+
+static void suppressButton(UIView *button) {
+    if (!button) return;
+    ensureButtonArrivalHook(button);
+    SGRSuppress(button);
 }
 
 // Issue #162: with both gone, previous and next spread out over the room the two left, the way the Music app sets
@@ -217,15 +252,54 @@ static void spreadControls(UIView *host, UIStackView *row, NSArray<UIView *> *ar
 }
 
 // Each is looked for only in its own end of the row, so a row without it (a podcast's) costs a walk of one
-// element, not the unit.
+// element, not the unit. While the inline queue is open, both are hidden on the main transport bar since
+// Shuffle and Repeat live in the queue's 4-pill header bar, matching Apple Music.
+static void setQueueOuterSlotHidden(UIView *slotView, UIView *innerButton, BOOL hidePermanently, BOOL queueOpen) {
+    if (hidePermanently) {
+        suppressButton(innerButton);
+        return;
+    }
+    UIView *target = innerButton ?: slotView;
+    if (!target) return;
+    if (queueOpen) {
+        SGRPlayerVanish(target);
+        if (slotView && slotView != target) SGRPlayerVanish(slotView);
+    } else {
+        target.alpha = 1.0;
+        target.userInteractionEnabled = YES;
+        target.accessibilityElementsHidden = NO;
+        if (slotView && slotView != target) {
+            slotView.alpha = 1.0;
+            slotView.userInteractionEnabled = YES;
+            slotView.accessibilityElementsHidden = NO;
+        }
+    }
+}
+
 static void hideShuffleAndRepeat(UIView *host, UIStackView *row) {
     sg_buttonsHost = host;
     NSArray<UIView *> *arranged = row.arrangedSubviews;
-    UIView *shuffle = sg_hideShuffle ? SGRFindByIdentifier(arranged.firstObject, kShuffleID, &kShuffleKey) : nil;
-    UIView *repeat = sg_hideRepeat ? SGRFindByIdentifier(arranged.lastObject, kRepeatID, &kRepeatKey) : nil;
-    suppressButton(shuffle);
-    suppressButton(repeat);
-    if (sg_hideShuffle && sg_hideRepeat) spreadControls(host, row, arranged, shuffle, repeat);
+    UIView *firstSlot = arranged.count >= 5 ? arranged.firstObject : nil;
+    UIView *lastSlot  = arranged.count >= 5 ? arranged.lastObject  : nil;
+    UIView *shuffle = SGRFindByIdentifier(firstSlot, kShuffleID, &kShuffleKey);
+    UIView *repeat  = SGRFindByIdentifier(lastSlot, kRepeatID, &kRepeatKey);
+    ensureButtonArrivalHook(shuffle ?: repeat);
+    BOOL queueOpen = SGRPlayerQueueOpen();
+    setQueueOuterSlotHidden(firstSlot, shuffle, sg_hideShuffle, queueOpen);
+    setQueueOuterSlotHidden(lastSlot, repeat, sg_hideRepeat, queueOpen);
+    if (!queueOpen && sg_hideShuffle && sg_hideRepeat) {
+        spreadControls(host, row, arranged, shuffle, repeat);
+    }
+}
+
+void SGRPlayerControlsQueueChanged(void) {
+    UIView *host = sg_buttonsHost;
+    if (host) {
+        UIStackView *row = (UIStackView *)SGFindRemembered(host, &kRowKey, ^BOOL(UIView *v) { return SGIsRow(v); });
+        if (row) hideShuffleAndRepeat(host, row);
+        updateTransportPositionsForQueue(host);
+    }
+    updateDurationForQueue();
 }
 
 #pragma mark - play
@@ -310,11 +384,69 @@ void SGRPlayerPlayGlyphIn(UIView *host) {
     dispatch_once(&once, ^{ SGLog(@"redesign player: play glyph over %@ (disc %@ suppressed), spinner %@", NSStringFromClass(play.class), NSStringFromClass(disc.class), spinnerShowing(button) ? @"showing" : @"hidden"); });
 }
 
+static void updateTransportPositionsForQueue(UIView *host) {
+    if (!host) return;
+    UIView *prev = SGRFindByIdentifier(host, @"SPTNowPlayingPreviousTrackButton", &kPreviousKey);
+    UIView *next = SGRFindByIdentifier(host, @"SPTNowPlayingNextTrackButton", &kNextKey);
+    if (!prev || !next) {
+        UIStackView *row = (UIStackView *)SGFindRemembered(host, &kRowKey, ^BOOL(UIView *v) { return SGIsRow(v); });
+        if (row.arrangedSubviews.count >= 5) {
+            if (!prev) prev = row.arrangedSubviews[1];
+            if (!next) next = row.arrangedSubviews[3];
+        }
+    }
+    if (!prev || !next) return;
+
+    SGRGlyphView *prevGlyph = objc_getAssociatedObject(prev, &kGlyphKey);
+    SGRGlyphView *nextGlyph = objc_getAssociatedObject(next, &kGlyphKey);
+
+    BOOL queueOpen = SGRPlayerQueueOpen();
+    if (queueOpen) {
+        CGFloat w = host.bounds.size.width > 100.0 ? host.bounds.size.width : 390.0;
+        // Center Rewind at x = 88.0 pt and Fast-Forward at x = 301.7 pt on 390pt screen
+        CGFloat prevTargetX = round(w * (90.5 / 390.0));
+        CGFloat nextTargetX = round(w * (300.5 / 390.0));
+        CGFloat prevCurX = [prev convertPoint:CGPointMake(CGRectGetMidX(prev.bounds), CGRectGetMidY(prev.bounds)) toView:host].x - prev.transform.tx;
+        CGFloat nextCurX = [next convertPoint:CGPointMake(CGRectGetMidX(next.bounds), CGRectGetMidY(next.bounds)) toView:host].x - next.transform.tx;
+        CGFloat prevDx = round(prevTargetX - prevCurX);
+        CGFloat nextDx = round(nextTargetX - nextCurX);
+        CGAffineTransform prevT = CGAffineTransformMakeTranslation(prevDx, 0.0);
+        CGAffineTransform nextT = CGAffineTransformMakeTranslation(nextDx, 0.0);
+        if (!CGAffineTransformEqualToTransform(prev.transform, prevT)) prev.transform = prevT;
+        if (!CGAffineTransformEqualToTransform(next.transform, nextT)) next.transform = nextT;
+
+        // Visual size in Apple Music Queue: 39.7x22.7 pt for skip glyphs (pointSize 30.0) and 31.7x35.7 pt for play glyph (pointSize 42.6)
+        CGFloat skipScale = 30.0 / kSkipGlyphSize;
+        CGAffineTransform skipScaleT = CGAffineTransformMakeScale(skipScale, skipScale);
+        if (prevGlyph && !CGAffineTransformEqualToTransform(prevGlyph.transform, skipScaleT)) prevGlyph.transform = skipScaleT;
+        if (nextGlyph && !CGAffineTransformEqualToTransform(nextGlyph.transform, skipScaleT)) nextGlyph.transform = skipScaleT;
+
+        if (sg_playGlyph) {
+            CGFloat playScale = 42.6 / kPlayGlyphSize;
+            CGAffineTransform playT = CGAffineTransformMakeScale(playScale, playScale);
+            if (!CGAffineTransformEqualToTransform(sg_playGlyph.transform, playT)) sg_playGlyph.transform = playT;
+        }
+
+        if (prev.superview) prev.superview.clipsToBounds = NO;
+        if (next.superview) next.superview.clipsToBounds = NO;
+        host.clipsToBounds = NO;
+    } else {
+        if (!CGAffineTransformIsIdentity(prev.transform)) prev.transform = CGAffineTransformIdentity;
+        if (!CGAffineTransformIsIdentity(next.transform)) next.transform = CGAffineTransformIdentity;
+        if (prevGlyph && !CGAffineTransformIsIdentity(prevGlyph.transform)) prevGlyph.transform = CGAffineTransformIdentity;
+        if (nextGlyph && !CGAffineTransformIsIdentity(nextGlyph.transform)) nextGlyph.transform = CGAffineTransformIdentity;
+        if (sg_playGlyph && !CGAffineTransformIsIdentity(sg_playGlyph.transform)) {
+            sg_playGlyph.transform = CGAffineTransformIdentity;
+        }
+    }
+}
+
 %hook _TtC20NowPlaying_ModesImpl28PlaybackControlsElementsUnit
 - (void)viewDidLayoutSubviews {
     %orig;
     UIView *host = ((UIViewController *)self).viewIfLoaded;
     if (!host) return;
+    sg_buttonsHost = host;
     // The unit lays out before its row does, and the glyphs are centered on the buttons in it.
     UIStackView *row = (UIStackView *)SGFindRemembered(host, &kRowKey, ^BOOL(UIView *v) { return SGIsRow(v); });
     [row layoutIfNeeded];
@@ -322,6 +454,7 @@ void SGRPlayerPlayGlyphIn(UIView *host) {
     skipGlyph(host, @"SPTNowPlayingNextTrackButton", &kNextKey, @"forward.fill");
     SGRPlayerPlayGlyphIn(host);
     hideShuffleAndRepeat(host, row);
+    updateTransportPositionsForQueue(host);
 }
 %end
 
@@ -334,6 +467,7 @@ void SGRPlayerPlayGlyphIn(UIView *host) {
     // The first state can land after the controls laid out, which left the disc for want of one.
     if (!sg_playGlyph) [sg_controlsHost setNeedsLayout];
     refreshPlayGlyph(YES);
+    SGRPlayerControlsQueueChanged();
     // Spotify raises its spinner a moment after a state says loading, and drops it a moment after.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kSpinnerCheck * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ refreshPlayGlyph(YES); });
 }
@@ -518,23 +652,100 @@ static void watchSlider(UIView *host) {
 }
 
 %hook _TtCO17NowPlaying_ECMKit11ProgressBar6Slider
+- (void)layoutSubviews {
+    %orig;
+    if (SGRPlayerQueueOpen()) {
+        CGFloat targetScale = 326.0 / 340.0;
+        CGAffineTransform scaleT = CGAffineTransformMakeScale(targetScale, 1.0);
+        UISlider *slider = (UISlider *)self;
+        if (!CGAffineTransformEqualToTransform(slider.transform, scaleT)) slider.transform = scaleT;
+    }
+}
 - (BOOL)isTracking {
     return ((UISlider *)self == sg_seekSlider && seekHeld()) || %orig;
 }
 %end
 
+static void updateDurationForQueue(void) {
+    UIView *host = sg_durationHost ?: sg_durationUnit.viewIfLoaded;
+    if (!host) return;
+    UILabel *taken = monospaced(host, @"now-playing-time-take-label-internal", &kTakeKey);
+    UILabel *remaining = monospaced(host, @"now-playing-time-remaning-label-internal", &kRemainingKey);
+
+    UISlider *slider = (UISlider *)SGRFindByIdentifier(host, @"SPTNowPlayingSliderV2", &kSliderKey);
+    if (slider && [slider isKindOfClass:UISlider.class]) {
+        BOOL queueOpen = SGRPlayerQueueOpen();
+        if (queueOpen) {
+            // Apply scale transform so progress bar width contracts from 340 pt to 326 pt,
+            // placing its left and right edges at exactly screen x = 32.0 pt and 358.0 pt (matching Row 5 artwork).
+            CGFloat targetScale = 326.0 / 340.0;
+            CGAffineTransform scaleT = CGAffineTransformMakeScale(targetScale, 1.0);
+            if (!CGAffineTransformEqualToTransform(slider.transform, scaleT)) slider.transform = scaleT;
+
+            // Places elapsed & remaining time labels at y = 566.3..575.0 pt matching Apple Music
+            CGAffineTransform takenT = CGAffineTransformMakeTranslation(8.0, 5.1);
+            if (taken && !CGAffineTransformEqualToTransform(taken.transform, takenT)) taken.transform = takenT;
+
+            CGAffineTransform remT = CGAffineTransformMakeTranslation(-8.0, 5.1);
+            if (remaining && !CGAffineTransformEqualToTransform(remaining.transform, remT)) remaining.transform = remT;
+        } else {
+            if (!CGAffineTransformIsIdentity(slider.transform)) slider.transform = CGAffineTransformIdentity;
+            if (taken && !CGAffineTransformIsIdentity(taken.transform)) taken.transform = CGAffineTransformIdentity;
+            if (remaining && !CGAffineTransformIsIdentity(remaining.transform)) remaining.transform = CGAffineTransformIdentity;
+        }
+        slider.minimumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.58];
+        slider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.22];
+
+        // Hide extra labels inside DurationElementUnit (such as Podcast chapter title) while Queue is open
+        SGForEachView(host, ^(UIView *v) {
+            if ([v isKindOfClass:UILabel.class] && v != taken && v != remaining) {
+                v.alpha = queueOpen ? 0.0 : 1.0;
+            }
+        });
+    }
+
+    if (taken) {
+        taken.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+        taken.textColor = [UIColor colorWithWhite:1.0 alpha:0.48];
+        taken.layer.compositingFilter = @"plusL";
+    }
+    if (remaining) {
+        remaining.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+        remaining.textColor = [UIColor colorWithWhite:1.0 alpha:0.48];
+        remaining.layer.compositingFilter = @"plusL";
+        if ([remaining.text containsString:@"-"] && ![remaining.text containsString:@"\u2212"]) {
+            remaining.text = [remaining.text stringByReplacingOccurrencesOfString:@"-" withString:@"\u2212"];
+        }
+    }
+}
+
 // The ordinary player's duration unit and the AI DJ's (DJMDurationElementsUnit) hold the same progress bar and times.
 static void durationLaidOut(UIViewController *unit) {
-    UIView *host = unit.viewIfLoaded;
+    sg_durationUnit = unit;
+    sg_durationHost = unit.viewIfLoaded;
+    UIView *host = sg_durationHost;
     if (!host) return;
     watchSlider(host);
+    updateDurationForQueue();
+
     UILabel *taken = monospaced(host, @"now-playing-time-take-label-internal", &kTakeKey);
-    monospaced(host, @"now-playing-time-remaning-label-internal", &kRemainingKey);
     // Whether Spotify's font has digits of one width shows in the descriptor's feature settings.
     if (!taken) return;
     static dispatch_once_t once;
     dispatch_once(&once, ^{ SGLog(@"redesign player: monospaced times in %@ %.0fpt, features %@", taken.font.fontName, taken.font.pointSize, taken.font.fontDescriptor.fontAttributes[UIFontDescriptorFeatureSettingsAttribute]); });
 }
+
+%hook UILabel
+- (void)setText:(NSString *)text {
+    if (text.length && [text hasPrefix:@"-"] && ![text hasPrefix:@"\u2212"]) {
+        NSString *ident = self.accessibilityIdentifier;
+        if ([ident isEqualToString:@"now-playing-time-remaning-label-internal"]) {
+            text = [text stringByReplacingOccurrencesOfString:@"-" withString:@"\u2212"];
+        }
+    }
+    %orig(text);
+}
+%end
 
 %hook _TtC20NowPlaying_ModesImpl19DurationElementUnit
 - (void)viewDidLayoutSubviews {

@@ -81,6 +81,7 @@ static __weak SGRMenuSession *sg_hosted;
 static BOOL sg_redirecting;
 // A page a row presented as a sheet of its own (Sleep timer's), kept hidden while the menu shows its rows.
 static __weak UIViewController *sg_pageSheet;
+static __weak UIView *sg_activeAnchor;
 // The player's quick items: what the item says, its symbol, the title of Spotify's row it fires (compared
 // without case) and that row's item number, the accessibility identifier of its Encore ListRow on 9.1.78. The
 // number is matched first, so a sheet in another language still finds them; the title is the fallback.
@@ -476,6 +477,7 @@ static void fadeButton(UIView *button, BOOL away) {
 @implementation SGRMenuFront
 
 - (UIContextMenuConfiguration *)contextMenuInteraction:(UIContextMenuInteraction *)interaction configurationForMenuAtLocation:(CGPoint)location {
+    sg_activeAnchor = self.superview ?: self;
     // Opened from code by the session that waited for its rows (openWhenRead): its menu, from the sheet it has, and no
     // second session asking Spotify for a second sheet.
     SGRMenuSession *pending = self.session;
@@ -1906,7 +1908,10 @@ static void rememberPage(NSString *kind) {
         // still on its way goes as it comes.
         if (self.direct && !presented) {
             if (pick) pick();
-            else self->_dropOnArrival = YES;
+            else {
+                self->_dropOnArrival = YES;
+                if (sg_requesting == self) sg_requesting = nil;
+            }
             return;
         }
         // A page's own menu whose sheet Spotify took down (Sleep timer's) still has the page to pick on or let go of.
@@ -1970,7 +1975,11 @@ BOOL SGPlayerMenuReplaced(UIViewController *menu) {
 
 #pragma mark - the ⋯
 
-void SGRSystemMenuWatch(UIView *button, SGRMenuItems items, SGRMenuKind kind) {
+UIView *SGRSystemMenuActiveAnchor(void) {
+    return sg_activeAnchor;
+}
+
+void SGRSystemMenuWatchTarget(UIView *button, UIControl *spotifyTarget, SGRMenuItems items, SGRMenuKind kind) {
     if (![button isKindOfClass:UIControl.class]) return;
     SGRMenuFront *front = objc_getAssociatedObject(button, &kFrontKey);
     if (!front) {
@@ -1992,7 +2001,7 @@ void SGRSystemMenuWatch(UIView *button, SGRMenuItems items, SGRMenuKind kind) {
         SGLog(@"system menu: the %@ (%@) opens the menu from a button of the mod's over it", items ? @"player's ⋯" : @"page's pinned ⋯",
               NSStringFromClass(button.class));
     }
-    front.spotify = (UIControl *)button;
+    front.spotify = [spotifyTarget isKindOfClass:UIControl.class] ? spotifyTarget : nil;
     front.items = items;
     front.kind = kind;
     // VoiceOver reaches the mod's button rather than Spotify's ⋯, with the ⋯'s own words, so it opens the menu too.
@@ -2020,6 +2029,10 @@ void SGRSystemMenuWatch(UIView *button, SGRMenuItems items, SGRMenuKind kind) {
         SGLog(@"system menu: the mod's ⋯ at %@ over Spotify's at %@ in the window; a touch at the ⋯'s middle reaches %@",
               NSStringFromCGRect(over), NSStringFromCGRect(under), reaches);
     }
+}
+
+void SGRSystemMenuWatch(UIView *button, SGRMenuItems items, SGRMenuKind kind) {
+    SGRSystemMenuWatchTarget(button, [button isKindOfClass:UIControl.class] ? (UIControl *)button : nil, items, kind);
 }
 
 UIControl *SGRSystemMenuFront(UIView *button) {
@@ -2231,7 +2244,7 @@ static void openWhenUp(SGRMenuSession *session, UIViewController *sheet, int tri
     UIWindow *in = self.viewIfLoaded.window;
     // The sheet the player's menu asked Spotify for: into the mod's window, unseen.
     SGRMenuSession *requesting = sg_requesting;
-    if (requesting && in != sg_host && CACurrentMediaTime() - sg_requestedAt <= kRequestWindow && !SGIsAlertController(presented)) {
+    if (requesting && in != sg_host && CACurrentMediaTime() - sg_requestedAt <= kRequestWindow && sheetIn(presented) && !SGIsAlertController(presented)) {
         sg_requesting = nil;
         [requesting adoptSheet:presented from:self completion:completion];
         return;

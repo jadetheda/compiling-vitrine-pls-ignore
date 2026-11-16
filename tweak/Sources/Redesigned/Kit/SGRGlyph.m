@@ -10,6 +10,9 @@ static const CGFloat kMinTouch = 44, kPressAlpha = 0.5, kPressScale = 0.9, kDisa
 
 - (instancetype)initWithSymbol:(NSString *)symbol pointSize:(CGFloat)size weight:(UIImageSymbolWeight)weight {
     if (!(self = [super initWithFrame:CGRectZero])) return nil;
+    self.opaque = NO;
+    self.layer.opaque = NO;
+    self.backgroundColor = UIColor.clearColor;
     _symbol = [symbol copy];
     self.preferredSymbolConfiguration = [UIImageSymbolConfiguration configurationWithPointSize:size weight:weight];
     self.image = symbol ? [UIImage systemImageNamed:symbol] : nil;
@@ -48,6 +51,9 @@ static const CGFloat kMinTouch = 44, kPressAlpha = 0.5, kPressScale = 0.9, kDisa
 
 + (instancetype)buttonWithSymbol:(NSString *)symbol pointSize:(CGFloat)size title:(NSString *)accessibilityTitle {
     SGRGlyphButton *button = [[self alloc] initWithFrame:CGRectMake(0, 0, kMinTouch, kMinTouch)];
+    button.opaque = NO;
+    button.layer.opaque = NO;
+    button.backgroundColor = UIColor.clearColor;
     button->_glyph = [[SGRGlyphView alloc] initWithSymbol:symbol pointSize:size weight:UIImageSymbolWeightRegular];
     [button addSubview:button->_glyph];
     button.isAccessibilityElement = YES;

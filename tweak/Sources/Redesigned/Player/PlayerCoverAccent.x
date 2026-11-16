@@ -48,6 +48,13 @@ static UIColor *coverColor(void) {
     return made;
 }
 
+UIColor *SGRPlayerCurrentAccent(void) {
+    if (SGRPlayerFollowsCover() && sg_cover >= 0) {
+        return coverColor();
+    }
+    return SGRAccent();
+}
+
 // -[UIColor getHue:saturation:brightness:alpha:] worked out from the components, without making a color for it.
 static void hsv(CGFloat r, CGFloat g, CGFloat b, CGFloat *h, CGFloat *s, CGFloat *v) {
     CGFloat high = MAX(r, MAX(g, b)), low = MIN(r, MIN(g, b)), range = high - low;
@@ -243,6 +250,7 @@ static void paintTree(UIView *root) {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     SGForEachView(root, ^(UIView *view) {
+        if ([view isKindOfClass:NSClassFromString(@"SGRGlyphView")] || [view isKindOfClass:NSClassFromString(@"SGRGlyphButton")]) return;
         if ([view.accessibilityIdentifier isEqualToString:SGRPlainCheckIdentifier]) view.tintColor = sg_cover < 0 ? SGRAccent() : coverColor();
         else if ([view isKindOfClass:UIImageView.class]) paintImageView((UIImageView *)view);
         else if (lottie && [view isKindOfClass:lottie]) paintLayers(view.layer);
@@ -312,6 +320,7 @@ void SGRPlayerSetCoverAccent(UIColor *cover) {
     SGRPlayerPaintCover(sg_stack);
     sg_barSearched = nil; // a new cover looks again, for a button the last bar state did not have
     paintBar(sgr_nowPlayingRoot);
+    [[NSNotificationCenter defaultCenter] postNotificationName:SGRPlayerCoverAccentDidChangeNotification object:nil];
 }
 
 // A button in the player's stack, or the mini player's device or like button, laid out: Spotify hands it a new state's

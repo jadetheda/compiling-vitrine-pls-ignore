@@ -28,7 +28,38 @@ static const CGFloat kSlots[4] = {0.2, 0.4, 0.6, 0.8};
 // The DJ button's blue disc is 48pt, a good deal more than the glyphs beside it; drawn this much of that.
 static const CGFloat kDJButtonScale = 0.88;
 static char kPrevKey, kNextKey, kPlayKey, kGlyphKey;
-static char kShareKey, kConnectKey, kDJKey, kQueueKey, kDJMaskKey, kDJGlyphKey;
+static char kShareKey, kConnectKey, kDJKey, kDJMaskKey, kDJGlyphKey, kDJFindKey;
+static __weak UIView *sg_djButton;
+
+static UIView *findDJButton(void) {
+    if (sg_djButton && sg_djButton.window) return sg_djButton;
+    UIView *footer = SGRPlayerFooterRow();
+    if (footer) {
+        UIView *dj = SGRFindByIdentifier(footer, @"Components.UI.NeffleButtonNowPlayingContainerView", &kDJFindKey);
+        if (dj) { sg_djButton = dj; return dj; }
+    }
+    UIView *host = SGRPlayerHost();
+    if (host) {
+        UIView *dj = SGRFindByIdentifier(host, @"Components.UI.NeffleButtonNowPlayingContainerView", &kDJFindKey);
+        if (dj) { sg_djButton = dj; return dj; }
+    }
+    return nil;
+}
+
+BOOL SGRPlayerDJAvailable(void) {
+    UIView *dj = findDJButton();
+    if (dj && dj.window && !dj.hidden && dj.alpha > 0.01) return YES;
+    SPTPlayerState *state = SGPlayerState();
+    if (state && [SGURIString(state.contextURI) containsString:@"37i9dQZF1EYkqdzj48dyYq"]) {
+        return dj != nil;
+    }
+    return NO;
+}
+
+void SGRPlayerTriggerDJ(void) {
+    UIView *dj = findDJButton();
+    if (dj) SGRActivate(dj);
+}
 
 #pragma mark - previous and next
 
@@ -114,17 +145,6 @@ static void placeHolder(UIView *holder, CGFloat from, CGFloat to, CGFloat scale)
     if (!CGAffineTransformEqualToTransform(holder.transform, transform)) holder.transform = transform;
 }
 
-static SGRGlyphButton *glyphButtonIn(UIView *host, const void *key, NSString *symbol, NSString *title, UIColor *tint, void (^tap)(void)) {
-    SGRGlyphButton *button = objc_getAssociatedObject(host, key);
-    if (!button) {
-        button = [SGRGlyphButton buttonWithSymbol:symbol pointSize:kFooterGlyphSize title:title];
-        button.glyph.tintColor = tint;
-        button.onTap = tap;
-        objc_setAssociatedObject(host, key, button, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    if (button.superview != host) [host addSubview:button];
-    return button;
-}
 
 // Nothing of `view` drawn, by an empty mask on its layer: Spotify gives the share button and its holder their alpha back
 // after the footer lays out, which the DJ's disc hid until the waveform took its place, and leaves a mask alone.
@@ -194,18 +214,18 @@ static void styleFooter(UIViewController *unit) {
         SGRPlayerCoverConnect(connectHolder, glyph);
     }
 
-    SGRGlyphButton *queue = glyphButtonIn(host, &kQueueKey, @"list.bullet", @"Queue", SGRPrimary(), ^{
-        SGOpenSpotifyURI([NSURL URLWithString:@"spotify:now-playing:queue"]);
-    });
-    queue.bounds = CGRectMake(0, 0, 44, 44);
+    SGRGlyphButton *queue = SGRPlayerQueueGlyphIn(host);
+    queue.bounds = CGRectMake(0, 0, 38, 38);
     queue.center = CGPointMake(slot(2), middleY);
     if (SGRPlayerSpotifyIcons()) SGRPlayerEncoreGlyphIn(queue, @"queue").transform = CGAffineTransformMakeScale(kEncoreQueueScale, kEncoreQueueScale);
+    SGRPlayerQueueChanged();
 
     // The DJ button at the last place. Connect's view reaches a long way to the right of its glyph, so the
     // DJ's goes above it in the stack, or Connect would take its touches.
     UIView *dj = SGRFindByIdentifier(host, @"Components.UI.NeffleButtonNowPlayingContainerView", &kDJKey);
     UIView *djHolder = holderIn(host, dj);
     if (djHolder) {
+        sg_djButton = dj;
         placeHolder(djHolder, djHolder.center.x, slot(3), kDJButtonScale);
         NSArray<UIView *> *order = host.subviews;
         if (connectHolder && [order indexOfObject:djHolder] < [order indexOfObject:connectHolder]) [host bringSubviewToFront:djHolder];
