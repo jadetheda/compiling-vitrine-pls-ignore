@@ -42,6 +42,11 @@ static void scrubEnded(void) {
     [SGSponsorBlockOverlay attachToSlider:(UIView *)self];
 }
 
+- (void)setHighlighted:(BOOL)highlighted {
+    %orig;
+    [SGSponsorBlockOverlay attachToSlider:(UIView *)self];
+}
+
 - (BOOL)beginTrackingWithTouch:(UITouch *)touch withEvent:(UIEvent *)event {
     BOOL tracking = %orig;
     if (tracking) scrubBegan((UIView *)self);

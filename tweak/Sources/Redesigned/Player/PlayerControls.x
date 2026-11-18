@@ -524,6 +524,11 @@ static void watchSlider(UIView *host) {
     [SGSponsorBlockOverlay attachToSlider:(UIView *)self];
 }
 
+- (void)setHighlighted:(BOOL)highlighted {
+    %orig;
+    [SGSponsorBlockOverlay attachToSlider:(UIView *)self];
+}
+
 - (void)didMoveToWindow {
     %orig;
     if (((UIView *)self).window) [SGSponsorBlockOverlay attachToSlider:(UIView *)self];

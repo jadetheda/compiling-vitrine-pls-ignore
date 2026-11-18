@@ -10,8 +10,9 @@ static const CGFloat kMinTrackHeight = 3.0;
 static const CGFloat kMaxTrackHeight = 16.0;
 static const CGFloat kDefaultTrackHeight = 7.0;
 static const CGFloat kExpandedTrackHeight = 12.0;
-static const CGFloat kDefaultTrackInset = 3.0;
-static const CGFloat kMaxMidYOffset = 5.5;
+static const CGFloat kLegacyTrackInset = 3.0;
+static const CGFloat kFluidMaxMidYOffset = 1.0;
+static const CGFloat kLegacyMaxMidYOffset = 5.5;
 
 @interface SGSponsorBlockSegmentBar : UIView
 @property (nonatomic) CGFloat startRatio;
@@ -172,6 +173,15 @@ static BOOL isVisualElementView(UIView *view) {
     return [name containsString:@"VisualElement"];
 }
 
+static BOOL isFluidSlider(UIView *visualElement) {
+    if (visualElement) {
+        if (SGClassNamed(visualElement.class, @"_UISliderFluidVisualElement")) return YES;
+        if (SGClassNamed(visualElement.class, @"_UISlideriOSVisualElement")) return NO;
+        if ([NSStringFromClass(visualElement.class) containsString:@"Fluid"]) return YES;
+    }
+    return !SGBelowiOS26();
+}
+
 static BOOL isThumbView(UIView *view) {
     NSString *name = NSStringFromClass(view.class);
     return [name containsString:@"Thumb"] || [name containsString:@"Knob"];
@@ -181,7 +191,7 @@ static BOOL isColorVisible(CGColorRef color) {
     return color != NULL && CGColorGetAlpha(color) > 0.01;
 }
 
-static BOOL hasRenderedLayerContent(CALayer *layer) {
+static BOOL hasRenderedLayerContent(CALayer *layer, BOOL allowMaskOnly) {
     if (!layer || layer.hidden || layer.opacity <= 0.01) return NO;
     if (isColorVisible(layer.backgroundColor) || layer.contents != nil) return YES;
     if ([layer isKindOfClass:CAShapeLayer.class]) {
@@ -193,16 +203,19 @@ static BOOL hasRenderedLayerContent(CALayer *layer) {
     if ([layer isKindOfClass:CAGradientLayer.class] && ((CAGradientLayer *)layer).colors.count > 0) {
         return YES;
     }
-    if ((layer.masksToBounds && layer.cornerRadius >= 1.5) ||
-        layer.mask != nil ||
-        layer.compositingFilter != nil) {
+    NSString *name = NSStringFromClass(layer.class);
+    if ([name containsString:@"Backdrop"]) {
         return YES;
     }
-    NSString *name = NSStringFromClass(layer.class);
-    return [name containsString:@"Backdrop"];
+    if (allowMaskOnly && ((layer.masksToBounds && layer.cornerRadius >= 1.5) ||
+                          layer.mask != nil ||
+                          layer.compositingFilter != nil)) {
+        return YES;
+    }
+    return NO;
 }
 
-static BOOL hasRenderedTrackContent(UIView *view) {
+static BOOL hasRenderedTrackContent(UIView *view, BOOL allowMaskOnly) {
     if ([view isKindOfClass:UIImageView.class] && ((UIImageView *)view).image != nil) {
         return YES;
     }
@@ -212,10 +225,10 @@ static BOOL hasRenderedTrackContent(UIView *view) {
     if (view.backgroundColor && isColorVisible(view.backgroundColor.CGColor)) {
         return YES;
     }
-    if (view.clipsToBounds && view.layer.cornerRadius >= 1.5) {
+    if (allowMaskOnly && view.clipsToBounds && view.layer.cornerRadius >= 1.5) {
         return YES;
     }
-    return hasRenderedLayerContent(view.layer);
+    return hasRenderedLayerContent(view.layer, allowMaskOnly);
 }
 
 static CGRect renderedTrackRectForSubview(UIView *sub, UIView *slider) {
@@ -231,7 +244,36 @@ static CGRect renderedTrackRectForSubview(UIView *sub, UIView *slider) {
     return r;
 }
 
-static BOOL isValidTrackCandidate(CGRect r, CGFloat sliderW, CGFloat expectedMidY, CGFloat cornerRadius) {
+typedef struct {
+    CGFloat sliderW;
+    CGFloat expectedMidY;
+    CGFloat maxMidYOffset;
+    BOOL isFluid;
+    CGRect tr;
+    BOOL hasTr;
+    BOOL isHighlighted;
+    CGFloat targetHeight;
+} SGTrackSearchContext;
+
+static BOOL isShiftedTrackRectArtifact(CGRect r, const SGTrackSearchContext *ctx) {
+    if (!ctx->hasTr) return NO;
+    if (ctx->isHighlighted && ctx->targetHeight >= kExpandedTrackHeight - 1.0 &&
+        r.size.height <= ctx->tr.size.height + 0.5 && ctx->tr.size.height < ctx->targetHeight - 1.5) {
+        return YES;
+    }
+    if (fabs(CGRectGetMidY(ctx->tr) - ctx->expectedMidY) > 1.0 &&
+        fabs(CGRectGetMidY(r) - CGRectGetMidY(ctx->tr)) <= 0.75 &&
+        fabs(CGRectGetMidY(r) - ctx->expectedMidY) > 1.0) {
+        return YES;
+    }
+    return NO;
+}
+
+static BOOL isValidTrackCandidate(CGRect r,
+                                  CGFloat sliderW,
+                                  CGFloat expectedMidY,
+                                  CGFloat maxMidYOffset,
+                                  CGFloat cornerRadius) {
     if (!isFiniteRect(r)) return NO;
     BOOL thumbSized = (r.size.width <= r.size.height + 4.0 &&
                        r.size.width < sliderW * 0.25 &&
@@ -240,50 +282,50 @@ static BOOL isValidTrackCandidate(CGRect r, CGFloat sliderW, CGFloat expectedMid
     if (thumbSized) return NO;
     return r.size.height >= kMinTrackHeight && r.size.height <= kMaxTrackHeight &&
            r.size.width >= 1.0 &&
-           fabs(CGRectGetMidY(r) - expectedMidY) <= kMaxMidYOffset &&
+           fabs(CGRectGetMidY(r) - expectedMidY) <= maxMidYOffset &&
            r.origin.x >= -16.0 && CGRectGetMaxX(r) <= sliderW + 16.0;
 }
 
 static void collectLayerTrackCandidates(CALayer *layer,
                                         UIView *slider,
-                                        CGFloat expectedMidY,
+                                        const SGTrackSearchContext *ctx,
                                         NSUInteger depth,
                                         NSMutableArray<NSValue *> *outRects) {
     if (!layer || depth > 8 || outRects.count >= 32) return;
-    CGFloat sliderW = slider.bounds.size.width;
     for (CALayer *sub in layer.sublayers) {
         if (sub.hidden || sub.opacity <= 0.01) continue;
         if ([sub.delegate isKindOfClass:UIView.class] && isThumbView((UIView *)sub.delegate)) continue;
-        if (hasRenderedLayerContent(sub)) {
+        if (hasRenderedLayerContent(sub, !ctx->isFluid)) {
             CGRect r = [slider.layer convertRect:sub.bounds fromLayer:sub];
-            if (isValidTrackCandidate(r, sliderW, expectedMidY, sub.cornerRadius)) {
+            if (isValidTrackCandidate(r, ctx->sliderW, ctx->expectedMidY, ctx->maxMidYOffset, sub.cornerRadius) &&
+                (!ctx->isFluid || !isShiftedTrackRectArtifact(r, ctx))) {
                 [outRects addObject:[NSValue valueWithCGRect:r]];
             }
         }
-        collectLayerTrackCandidates(sub, slider, expectedMidY, depth + 1, outRects);
+        collectLayerTrackCandidates(sub, slider, ctx, depth + 1, outRects);
     }
 }
 
 static void collectLeafTrackCandidates(UIView *view,
                                        UIView *slider,
-                                       CGFloat expectedMidY,
+                                       const SGTrackSearchContext *ctx,
                                        NSUInteger depth,
                                        NSMutableArray<NSValue *> *outRects) {
     if (!view || depth > 8 || outRects.count >= 32) return;
-    CGFloat sliderW = slider.bounds.size.width;
     for (UIView *sub in view.subviews) {
         if (sub.hidden || sub.alpha <= 0.01 || sub.layer.hidden || sub.layer.opacity <= 0.01 || isThumbView(sub)) continue;
         CGRect r = renderedTrackRectForSubview(sub, slider);
-        if (hasRenderedTrackContent(sub) &&
-            isValidTrackCandidate(r, sliderW, expectedMidY, sub.layer.cornerRadius)) {
+        if (hasRenderedTrackContent(sub, !ctx->isFluid) &&
+            isValidTrackCandidate(r, ctx->sliderW, ctx->expectedMidY, ctx->maxMidYOffset, sub.layer.cornerRadius) &&
+            (!ctx->isFluid || !isShiftedTrackRectArtifact(r, ctx))) {
             [outRects addObject:[NSValue valueWithCGRect:r]];
         }
-        collectLeafTrackCandidates(sub, slider, expectedMidY, depth + 1, outRects);
+        collectLeafTrackCandidates(sub, slider, ctx, depth + 1, outRects);
     }
 }
 
 static CGFloat trackCandidateScore(CGRect r, CGFloat expectedMidY, CGFloat targetHeight) {
-    return fabs(r.size.height - targetHeight) * 6.0 + fabs(CGRectGetMidY(r) - expectedMidY) * 2.0;
+    return fabs(CGRectGetMidY(r) - expectedMidY) * 8.0 + fabs(r.size.height - targetHeight) * 4.0;
 }
 
 static CGRect selectBestTrackCandidate(NSArray<NSValue *> *candidates,
@@ -345,9 +387,10 @@ static BOOL isValidBufferingFrame(CGRect bf, CGFloat sliderW, CGFloat expectedMi
 // ProgressBar6Slider carries a UIKit slider visual element (_UISlideriOSVisualElement or iOS 26
 // _UISliderFluidVisualElement) and SliderBufferingAnimationView. Spotify's trackRectForBounds:
 // computes y = superRect.minY + (superRect.height - targetHeight) without halving the height delta,
-// which shifts tr.origin.y (and bufferingView.frame) upward relative to the centered iOS 26 fluid track.
-// Prefer rendered track views/layers inside the visual element centered near slider.bounds.midY,
-// then centered bufferingView, falling back to tr's horizontal bounds + height centered in slider.bounds.
+// which shifts tr.origin.y (and bufferingView.frame) upward relative to the centered iOS 26 fluid track,
+// and hardcodes a 7pt height even while the fluid track expands to 12pt during scrubbing.
+// For fluid sliders, require centered track candidates (rejecting tr-derived artifacts) and fall back
+// to horizontal tr bounds with targetHeight centered in slider.bounds.
 static CGRect resolveTrackFrame(UIView *slider, UIView *bufferingView, UIView *visualElement, BOOL *usedRenderedTrack) {
     if (usedRenderedTrack) *usedRenderedTrack = NO;
     if (!slider || slider.bounds.size.width <= 0 || slider.bounds.size.height <= 0) {
@@ -356,52 +399,77 @@ static CGRect resolveTrackFrame(UIView *slider, UIView *bufferingView, UIView *v
     CGFloat sliderW = slider.bounds.size.width;
     CGFloat sliderH = slider.bounds.size.height;
     CGFloat expectedMidY = CGRectGetMidY(slider.bounds);
-    BOOL isHighlighted = [slider isKindOfClass:UISlider.class] &&
-                         (((UISlider *)slider).highlighted || ((UISlider *)slider).tracking);
+    BOOL isHighlighted = [slider isKindOfClass:UISlider.class] && ((UISlider *)slider).highlighted;
+    BOOL isFluid = isFluidSlider(visualElement);
 
     CGRect tr = CGRectZero;
+    BOOL hasTr = NO;
     BOOL hasHorizontalTr = NO;
     CGFloat targetHeight = isHighlighted ? kExpandedTrackHeight : kDefaultTrackHeight;
     if ([slider isKindOfClass:UISlider.class]) {
         tr = [(UISlider *)slider trackRectForBounds:slider.bounds];
-        if (isFiniteRect(tr) &&
+        hasTr = isFiniteRect(tr) && tr.size.width > 0 && tr.size.height > 0;
+        if (hasTr &&
             tr.size.width >= sliderW - 16.0 &&
             tr.origin.x >= -16.0 && CGRectGetMaxX(tr) <= sliderW + 16.0) {
             hasHorizontalTr = YES;
         }
-        if (isFiniteRect(tr) && tr.size.height >= kMinTrackHeight && tr.size.height <= kMaxTrackHeight) {
+        if (hasTr && !isFluid && tr.size.height >= kMinTrackHeight && tr.size.height <= kMaxTrackHeight) {
             targetHeight = tr.size.height;
         }
     }
 
     if (visualElement && visualElement.superview == slider) {
+        SGTrackSearchContext ctx = {
+            .sliderW = sliderW,
+            .expectedMidY = expectedMidY,
+            .maxMidYOffset = isFluid ? kFluidMaxMidYOffset : kLegacyMaxMidYOffset,
+            .isFluid = isFluid,
+            .tr = tr,
+            .hasTr = hasTr,
+            .isHighlighted = isHighlighted,
+            .targetHeight = targetHeight,
+        };
         NSMutableArray<NSValue *> *viewCandidates = [NSMutableArray array];
-        collectLeafTrackCandidates(visualElement, slider, expectedMidY, 0, viewCandidates);
-        BOOL foundBest = NO;
-        CGRect bestRect = selectBestTrackCandidate(viewCandidates, sliderW, expectedMidY, targetHeight, &foundBest);
-        if (!foundBest) {
+        collectLeafTrackCandidates(visualElement, slider, &ctx, 0, viewCandidates);
+        BOOL foundView = NO;
+        CGRect bestView = selectBestTrackCandidate(viewCandidates, sliderW, expectedMidY, targetHeight, &foundView);
+
+        BOOL foundLayer = NO;
+        CGRect bestLayer = CGRectZero;
+        if (!foundView || isFluid) {
             NSMutableArray<NSValue *> *layerCandidates = [NSMutableArray array];
-            collectLayerTrackCandidates(visualElement.layer, slider, expectedMidY, 0, layerCandidates);
-            bestRect = selectBestTrackCandidate(layerCandidates, sliderW, expectedMidY, targetHeight, &foundBest);
+            collectLayerTrackCandidates(visualElement.layer, slider, &ctx, 0, layerCandidates);
+            bestLayer = selectBestTrackCandidate(layerCandidates, sliderW, expectedMidY, targetHeight, &foundLayer);
         }
-        if (foundBest) {
+
+        if (foundView || foundLayer) {
             if (usedRenderedTrack) *usedRenderedTrack = YES;
-            return bestRect;
+            if (foundView && foundLayer) {
+                CGFloat viewScore = trackCandidateScore(bestView, expectedMidY, targetHeight);
+                CGFloat layerScore = trackCandidateScore(bestLayer, expectedMidY, targetHeight);
+                return (layerScore + 0.01 < viewScore) ? bestLayer : bestView;
+            }
+            return foundView ? bestView : bestLayer;
         }
     }
 
-    if (bufferingView && bufferingView.superview == slider) {
+    if (!isFluid && bufferingView && bufferingView.superview == slider) {
         CGRect bf = bufferingView.frame;
-        if (isValidBufferingFrame(bf, sliderW, expectedMidY, 1.5)) {
+        if (isValidBufferingFrame(bf, sliderW, expectedMidY, kLegacyMaxMidYOffset)) {
             if (usedRenderedTrack) *usedRenderedTrack = YES;
             return bf;
         }
     }
 
-    CGFloat x = hasHorizontalTr ? tr.origin.x : kDefaultTrackInset;
-    CGFloat w = hasHorizontalTr ? tr.size.width : MAX(0.0, sliderW - kDefaultTrackInset * 2.0);
-    CGFloat h = MIN(targetHeight, sliderH);
-    CGFloat y = MAX(0.0, MIN(sliderH - h, expectedMidY - h / 2.0));
+    CGFloat fallbackInset = isFluid ? 0.0 : kLegacyTrackInset;
+    CGFloat x = hasHorizontalTr ? tr.origin.x : fallbackInset;
+    CGFloat w = hasHorizontalTr ? tr.size.width : MAX(0.0, sliderW - fallbackInset * 2.0);
+    CGFloat h = slider.clipsToBounds ? MIN(targetHeight, sliderH) : targetHeight;
+    CGFloat y = expectedMidY - h / 2.0;
+    if (slider.clipsToBounds) {
+        y = MAX(0.0, MIN(sliderH - h, y));
+    }
     return CGRectMake(x, y, w, h);
 }
 
@@ -472,6 +540,9 @@ static UIView *overlayAnchor(UIView *slider, UIView *bufferingView, UIView *visu
     CGRect trackFrame = resolveTrackFrame(slider, bufferingView, visualElement, &usedRenderedTrack);
     if (trackFrame.size.width <= 0 || trackFrame.size.height <= 0) return;
 
+    BOOL curHighlighted = [slider isKindOfClass:UISlider.class] && ((UISlider *)slider).highlighted;
+    BOOL highlightedChanged = container && (container.lastHighlighted != curHighlighted);
+
     BOOL needsRebuild = (!container ||
                          container.needsRebuild ||
                          container.cachedRawSegments != segments ||
@@ -482,7 +553,7 @@ static UIView *overlayAnchor(UIView *slider, UIView *bufferingView, UIView *visu
     if (!needsRebuild) {
         if (frameChanged) {
             BOOL heightChanged = fabs(container.frame.size.height - trackFrame.size.height) > 0.5;
-            if (animateHeightChange && heightChanged && UIView.inheritedAnimationDuration <= 0.0) {
+            if ((animateHeightChange || highlightedChanged) && heightChanged && UIView.inheritedAnimationDuration <= 0.0) {
                 [UIView animateWithDuration:0.15
                                       delay:0
                                     options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
@@ -529,10 +600,6 @@ static UIView *overlayAnchor(UIView *slider, UIView *bufferingView, UIView *visu
 
     BOOL prevUsedRendered = container.usedRenderedTrack;
     container.usedRenderedTrack = usedRenderedTrack;
-
-    BOOL curHighlighted = [slider isKindOfClass:UISlider.class] &&
-                          (((UISlider *)slider).highlighted || ((UISlider *)slider).tracking);
-    BOOL highlightedChanged = (container.lastHighlighted != curHighlighted);
     container.lastHighlighted = curHighlighted;
 
     // Visual elements lay out their child track views after ProgressBar6Slider -layoutSubviews returns;
