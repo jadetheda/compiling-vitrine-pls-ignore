@@ -12,9 +12,11 @@ static const CGFloat kDefaultTrackHeight = 7.0;
 static const CGFloat kExpandedTrackHeight = 12.0;
 static const CGFloat kLegacyTrackInset = 3.0;
 static const CGFloat kTrackSearchMaxMidYDelta = 16.0;
-static const NSUInteger kMaxSearchDepth = 14;
-static const NSUInteger kMaxCandidates = 64;
-static const NSUInteger kMaxPostLayoutRetries = 2;
+enum {
+    kMaxSearchDepth = 14,
+    kMaxCandidates = 64,
+    kMaxPostLayoutRetries = 2,
+};
 
 @interface SGSponsorBlockSegmentBar : UIView
 @property (nonatomic) CGFloat startRatio;
@@ -300,7 +302,7 @@ static CGRect superTrackRectForSlider(UISlider *slider, CGRect bounds) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         IMP imp = class_getMethodImplementation(UISlider.class, @selector(trackRectForBounds:));
-        s_uiSliderTrackRect = (TrackRectIMP)imp;
+        s_uiSliderTrackRect = (TrackRectIMP)(void *)imp;
     });
     if (!s_uiSliderTrackRect || !slider) return CGRectZero;
     return s_uiSliderTrackRect(slider, @selector(trackRectForBounds:), bounds);
