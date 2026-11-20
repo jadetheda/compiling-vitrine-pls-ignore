@@ -62,6 +62,10 @@ enum {
 - (void)stopDisplayLink;
 @end
 
+@interface SGSponsorBlockOverlay (Internal)
++ (void)updateSlider:(UIView *)slider animateHeightChange:(BOOL)animateHeightChange;
+@end
+
 @interface SGSponsorBlockOverlayContainer (DisplayLinkSync)
 - (void)handleDisplayLinkTick;
 @end
