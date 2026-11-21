@@ -8,9 +8,11 @@ static bool step(SGRMinimizeTrack *t, CGFloat offset) { return SGRMinimizeStep(t
 
 int main(void) {
     SGRMinimizeTrack t = {-100, false};
+    assert(SGRMinimizeProgress(&t, -88, -100, 2000) == 0.5); // half way to the 24pt threshold: 50% pre-minimize squish
     assert(!step(&t, -90));          // a little way down: a finger resting
     assert(!step(&t, -77));
     assert(step(&t, -76));           // 24 down from the top: minimized
+    assert(SGRMinimizeProgress(&t, -76, -100, 2000) == 0);   // once minimized, squish resets to 0
     assert(step(&t, 600));           // further down
     assert(step(&t, 590));           // a jitter back up is not a scroll up
     assert(!step(&t, 576));          // 24 back up from the lowest point, mid-list: expanded

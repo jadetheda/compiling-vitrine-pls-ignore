@@ -5,7 +5,6 @@
 #import <objc/runtime.h>
 
 NSString *const SGTabIconSetSymbols = @"symbols";
-
 static char kSymbolNameKey;
 
 static NSBundle *privateGlyphsBundle(void) {
@@ -38,30 +37,34 @@ static id privateAssetManager(void) {
     return mgr;
 }
 
-UIImage *SGSymbolImage(NSString *name) {
+UIImage *SGSymbolImageWithConfig(NSString *name, UIImageSymbolConfiguration *config) {
     if (!name.length) return nil;
-    static UIImageSymbolConfiguration *config;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        config = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightSemibold];
-    });
-    UIImage *image = [UIImage systemImageNamed:name withConfiguration:config];
+    UIImage *image = config
+        ? [UIImage systemImageNamed:name withConfiguration:config]
+        : [UIImage systemImageNamed:name];
     if (image) return image;
-
     SEL privateSel = NSSelectorFromString(@"_systemImageNamed:withConfiguration:allowPrivate:");
     if ([UIImage respondsToSelector:privateSel]) {
         image = ((UIImage *(*)(id, SEL, NSString *, id, BOOL))objc_msgSend)(UIImage.class, privateSel, name, config, YES);
         if (image) return image;
     }
-
     id assetMgr = privateAssetManager();
     if (assetMgr && [assetMgr respondsToSelector:@selector(imageNamed:)]) {
         @synchronized (assetMgr) {
             image = ((UIImage *(*)(id, SEL, NSString *))objc_msgSend)(assetMgr, @selector(imageNamed:), name);
         }
-        if (image) image = [image imageByApplyingSymbolConfiguration:config] ?: image;
+        if (image && config) image = [image imageByApplyingSymbolConfiguration:config] ?: image;
     }
     return image;
+}
+
+UIImage *SGSymbolImage(NSString *name) {
+    static UIImageSymbolConfiguration *config;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        config = [UIImageSymbolConfiguration configurationWithPointSize:19 weight:UIImageSymbolWeightSemibold];
+    });
+    return SGSymbolImageWithConfig(name, config);
 }
 
 NSString *SGTabIconSymbolName(UIView *icon) {

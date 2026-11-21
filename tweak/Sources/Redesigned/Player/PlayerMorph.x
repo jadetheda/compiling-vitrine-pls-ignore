@@ -84,6 +84,7 @@ static CGFloat screenRadius(void) {
     __weak UIView *_masked, *_stripPane;
     CGFloat _stripPaneAlpha;
     CGRect _card, _barArtwork, _barRest, _spotifyFrame;
+    CGFloat _restY;
     CGFloat _cardRadius, _spotifyAlpha;
     CGColorRef _overlayColor;
     BOOL _coverHidden;
@@ -94,14 +95,19 @@ static CGFloat screenRadius(void) {
 // Where the player's top edge rests when it has become the bar: 9.1.90's CompactOverlayTransition slides it down only
 // that far (y 727 of 874), not off the screen.
 - (CGFloat)restY {
-    return CGRectGetMinY(_card);
+    return _restY > 0 ? _restY : CGRectGetMinY(_card);
 }
 
 // 9.1.90's CompactOverlayTransition animates the player itself, so the morph follows where it is drawn. Spotify also
 // crossfades its bar stand-in with the player at each end, on the render server, so the bar is in its place the moment
 // the card lands even when the main thread stalls; the stand-in is left to Spotify.
-- (void)followFrom:(UIView *)source {
+- (void)followFrom:(UIView *)source npbFrame:(CGRect)npbFrame {
     _follows = YES;
+    if (!CGRectIsNull(npbFrame) && npbFrame.origin.y > 100) {
+        _restY = npbFrame.origin.y;
+    } else {
+        _restY = CGRectGetMinY(_card);
+    }
     // Next turn, once every hook on the transition's start has run: a close's glass copies (BarTransition.x) exist by
     // then whichever hook runs first. At either end the strip sits in the stand-in at Spotify's own alpha, so the turn
     // without the mask shows nothing new.
@@ -112,12 +118,13 @@ static CGFloat screenRadius(void) {
 
 - (void)maskStripFrom:(UIView *)source {
     if (_tornDown || !source) return;
+    UIView *bar = _bar;
+    if (!bar) return;
     // In a Jam the stand-in is the whole bar, strip and card, and the sheet grows from the card alone: the strip fades
     // in the first quarter of an open, so it never stands beside the growing player. Its place comes from Spotify's bar
     // the stand-in copies, scaled to the stand-in, not from the card: Spotify has already set the stand-in's end frame.
-    UIView *bar = _bar;
     CGRect strip = SGRNowPlayingStripFrameIn(source);
-    if (CGRectIsNull(strip) || !bar) return;
+    if (CGRectIsNull(strip)) return;
     CGSize from = source.bounds.size, to = bar.bounds.size;
     CGFloat sx = from.width > 0 ? to.width / from.width : 1, sy = from.height > 0 ? to.height / from.height : 1;
     strip = CGRectIntersection(CGRectMake(strip.origin.x * sx, strip.origin.y * sy, strip.size.width * sx, strip.size.height * sy), bar.bounds);
@@ -159,7 +166,7 @@ static CGFloat screenRadius(void) {
 }
 
 - (BOOL)masksStrip {
-    return _stripMask != nil;
+    return _stripPart != nil;
 }
 
 - (instancetype)initWithContainer:(UIView *)container overlay:(UIView *)overlay bar:(UIView *)bar barRest:(CGRect)barRest {
@@ -196,7 +203,7 @@ static CGFloat screenRadius(void) {
     if (bar.superview == container) [container bringSubviewToFront:bar];
 
     UIImage *artwork = SGRNowPlayingArtwork(NULL, NULL);
-    if (artwork && !CGRectIsNull(_barArtwork)) {
+    if (!SGRPlayerQueueOpen() && artwork && !CGRectIsNull(_barArtwork)) {
         _cover = [[UIImageView alloc] initWithImage:artwork];
         _cover.userInteractionEnabled = NO;
         _cover.contentMode = UIViewContentModeScaleAspectFill;
@@ -222,8 +229,8 @@ static CGFloat screenRadius(void) {
         // Where Spotify's animation has the player now: its frame's model value is already the end. Not drawn yet (an
         // open's first frame), it is at the bar and transparent.
         CALayer *drawn = overlay.layer.presentationLayer;
-        _spotifyFrame = drawn ? drawn.frame : (CGRect){{_spotifyFrame.origin.x, self.restY}, _spotifyFrame.size};
-        _spotifyAlpha = drawn ? drawn.opacity : 0;
+        _spotifyFrame = drawn ? drawn.frame : (CGRect){{self->_spotifyFrame.origin.x, lerp(self.restY, 0, t)}, self->_spotifyFrame.size};
+        _spotifyAlpha = drawn ? drawn.opacity : t;
     }
     CGRect full = container.bounds;
     CGRect sheet = lerpRect(_card, full, t);
@@ -245,12 +252,20 @@ static CGFloat screenRadius(void) {
         overlay.layer.sublayerTransform = CATransform3DIdentity;
         if (!self->_follows) overlay.frame = (CGRect){origin, self->_spotifyFrame.size};
         CGRect coverInPlayer = SGRPlayerCoverFrameIn(overlay);
+        if (CGRectIsNull(coverInPlayer) && self->_cover) {
+            [overlay setNeedsLayout];
+            [overlay layoutIfNeeded];
+            coverInPlayer = SGRPlayerCoverFrameIn(overlay);
+        }
 
         overlay.layer.sublayerTransform = CATransform3DScale(CATransform3DMakeTranslation(shift.x, shift.y, 0), scale, scale, 1);
         self->_mask.frame = CGRectMake(target.x, target.y, sheet.size.width, sheet.size.height);
         self->_mask.cornerRadius = radius;
+        self->_mask.opacity = self->_follows ? ramp(0.08, 0.55, t) : 1.0;
         if (!self->_follows) overlay.alpha = ramp(0.08, 0.55, t);
 
+        UIColor *fieldColor = SGRPlayerField().fieldColor;
+        if (fieldColor) self->_sheet.backgroundColor = fieldColor;
         self->_sheet.frame = sheet;
         self->_sheet.layer.cornerRadius = radius;
         // The sheet is the player's own paint, so it fades with the player Spotify fades against its bar stand-in.
@@ -258,12 +273,13 @@ static CGFloat screenRadius(void) {
 
         // The card's top edge is the sheet's.
         CGFloat rise = sheet.origin.y - self->_card.origin.y;
-        if (bar && !self->_follows) {
+        if (bar && !CGRectIsEmpty(self->_barRest)) {
             CGRect frame = bar.frame;
             frame.origin.y = self->_barRest.origin.y + rise;
             bar.frame = frame;
-            bar.alpha = 1 - ramp(0, 0.25, t);
-        } else if (self->_stripPart) {
+            if (!self->_follows) bar.alpha = 1 - ramp(0, 0.25, t);
+        }
+        if (self->_stripPart) {
             // Under Spotify's own crossfade of the stand-in, which stays its own.
             CGFloat strip = 1 - ramp(0, 0.25, t);
             self->_stripPart.opacity = strip;
@@ -290,7 +306,9 @@ static CGFloat screenRadius(void) {
                 to = CGRectOffset(to, -sheet.origin.x, -sheet.origin.y);
                 self->_cover.frame = CGRectOffset(lerpRect(from, to, t), sheet.origin.x, sheet.origin.y);
                 // The cover's corners are drawn under its paused shrink too.
-                self->_cover.layer.cornerRadius = lerp(from.size.width / 2, SGRRadiusArtwork * SGRPlayerCoverScale() * scale, t);
+                BOOL isCircle = SGInt(SGRKeyBarArtworkShape, SGRBarArtworkShapeRoundedSquare) == SGRBarArtworkShapeCircle;
+                CGFloat barRadius = isCircle ? (from.size.width / 2.0) : 6.5;
+                self->_cover.layer.cornerRadius = lerp(barRadius, SGRRadiusArtwork * SGRPlayerCoverScale() * scale, t);
                 // Over an animated artwork the player's cover is hidden: the flown one fades out on the
                 // way there instead of landing on an empty slot.
                 self->_cover.alpha = SGRPlayerMotionShowing() ? 1 - ramp(0.6, 1, t) : 1;
@@ -302,9 +320,10 @@ static CGFloat screenRadius(void) {
 
 - (void)tearDown {
     _tornDown = YES;
-    UIView *overlay = _overlay;
+    UIView *overlay = _overlay, *bar = _bar;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
+    if (bar && !CGRectIsEmpty(_barRest)) bar.frame = _barRest;
     overlay.layer.sublayerTransform = CATransform3DIdentity;
     if (overlay.layer.mask == _mask) overlay.layer.mask = nil;
     UIView *masked = _masked, *pane = _stripPane;
@@ -375,7 +394,7 @@ static SGRPlayerMorph *morphFor(SPTBarOverlayPresentationTransition *transition,
 // has the player and morphs to match, so Spotify's frame, alpha and completion stay its own. It is let go once the
 // transition is no longer interactive and the player has no animation left and holds still a few frames.
 static const CFTimeInterval kGiveUp = 0.9;   // ticking with no move this long; UIKit's whole presentation runs about 0.5 s
-static const float kCloseSpeed = 1.5;         // how much faster than Spotify's a close it runs on its own plays
+static const float kCloseSpeed = 1.2;         // how much faster than Spotify's a close it runs on its own plays
 
 @interface SGRMorphFollower : NSObject
 @property (nonatomic, strong) SGRPlayerMorph *morph;
@@ -409,7 +428,7 @@ static void runAtSpeed(CALayer *layer, float speed) {
     CALayer *drawn = overlay.layer.presentationLayer;
     CGFloat rest = self.morph.restY > 0 ? self.morph.restY : container.bounds.size.height;
     // An open's first frame has no presentation layer yet and its model already holds the end; Spotify starts it at the bar.
-    CGFloat y = drawn ? drawn.frame.origin.y : rest;
+    CGFloat y = drawn ? drawn.frame.origin.y : (self.closing ? 0 : rest);
     self.lastT = rest > 0 ? MIN(1, MAX(0, 1 - y / rest)) : 1;
     [self.morph apply:self.lastT];
     BOOL interactive = self.context.isInteractive;
@@ -488,9 +507,10 @@ static void followTransition(id transition, id<UIViewControllerContextTransition
     if (!overlay || overlay.superview != container) return;
     SGRMorphFollower *old = objc_getAssociatedObject(transition, &kFollowerKey);
     [old finish];
+    CGRect npbFrame = rectIvarOf(transition, "npbFrame");
     SGRPlayerMorph *morph = [[SGRPlayerMorph alloc] initWithContainer:container overlay:overlay bar:ivarOf(transition, "npbSnapshotView") barRest:CGRectZero];
     if (!morph) return;
-    [morph followFrom:ivarOf(transition, "npbView")];
+    [morph followFrom:ivarOf(transition, "npbView") npbFrame:npbFrame];
     UIView *tabStandIn = ivarOf(transition, "tabBarSnapshotView");
     tabStandIn.alpha = 0;
     tabStandIn.hidden = YES;   // its alpha is Spotify's to animate as well
@@ -501,7 +521,7 @@ static void followTransition(id transition, id<UIViewControllerContextTransition
     follower.overlay = overlay;
     follower.context = context;
     follower.lastY = CGFLOAT_MAX;
-    if (SGRNowPlayingStripHeight() > 0) follower.npbFrame = rectIvarOf(transition, "npbFrame");
+    follower.npbFrame = npbFrame;
     // A close plays faster: its slide, its stand-ins and so the morph that follows them. One Spotify runs on its own
     // from the start, one dragged by a finger from when it is let go (tick:).
     follower.closing = !to.isBeingPresented;

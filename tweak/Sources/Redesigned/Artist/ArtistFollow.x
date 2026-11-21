@@ -15,9 +15,15 @@
 - (id)subscribeCollectionStateForURL:(NSURL *)url completion:(void (^)(id state, NSError *error))completion;
 @end
 
+@protocol SGRCollectionPlatform <NSObject>
+- (void)addURL:(NSURL *)url showUIConfirmation:(BOOL)show completion:(id)completion;
+- (void)removeURL:(NSURL *)url showUIConfirmation:(BOOL)show completion:(id)completion;
+- (id)stateProvider;
+@end
+
 static __weak id sg_provider;
-// Guards sg_provider and keepProvider's `logged`; a lock of this file's own, so Spotify's threads binding rows
-// never queue behind another file's.
+// Guards sg_provider, sg_platform and keepProvider's `logged`; a lock of this file's own, so Spotify's threads
+// binding rows never queue behind another file's.
 static os_unfair_lock sg_providerLock = OS_UNFAIR_LOCK_INIT;
 
 // Called from wherever Spotify reaches for its provider, any thread.
@@ -41,12 +47,28 @@ static void keepProvider(id provider) {
 
 static __weak id sg_platform;
 
+static void keepPlatform(id platform) {
+    if (!platform || ![platform respondsToSelector:@selector(addURL:showUIConfirmation:completion:)]) return;
+    if (platform == sg_platform) return;
+    os_unfair_lock_lock(&sg_providerLock);
+    sg_platform = platform;
+    os_unfair_lock_unlock(&sg_providerLock);
+}
+
+static id currentPlatform(void) {
+    os_unfair_lock_lock(&sg_providerLock);
+    id platform = sg_platform;
+    os_unfair_lock_unlock(&sg_providerLock);
+    return platform;
+}
+
 static id currentProvider(void) {
     os_unfair_lock_lock(&sg_providerLock);
     id provider = sg_provider;
+    id platform = sg_platform;
     os_unfair_lock_unlock(&sg_providerLock);
-    if (!provider && [sg_platform respondsToSelector:@selector(stateProvider)]) {
-        provider = [sg_platform performSelector:@selector(stateProvider)];
+    if (!provider && [platform respondsToSelector:@selector(stateProvider)]) {
+        provider = [(id<SGRCollectionPlatform>)platform stateProvider];
         keepProvider(provider);
     }
     return provider;
@@ -55,10 +77,11 @@ static id currentProvider(void) {
 %hook SPTCollectionPlatformImplementation
 - (id)initWithCosmosDataLoader:(id)loader isGatedEntityRelationsEnabled:(BOOL)gated {
     id platform = %orig;
-    sg_platform = platform;
+    keepPlatform(platform);
     return platform;
 }
 - (id)stateProvider {
+    keepPlatform(self);
     id provider = %orig;
     keepProvider(provider);
     return provider;
@@ -67,6 +90,7 @@ static id currentProvider(void) {
 
 %hook _TtC23Collection_PlatformImpl22CollectionPlatformImpl
 - (id)stateProvider {
+    keepPlatform(self);
     id provider = %orig;
     keepProvider(provider);
     return provider;
@@ -75,6 +99,7 @@ static id currentProvider(void) {
 
 %hook _TtC23Collection_PlatformImpl27CollectionPlatformMigration
 - (id)stateProvider {
+    keepPlatform(self);
     id provider = %orig;
     keepProvider(provider);
     return provider;
@@ -83,6 +108,7 @@ static id currentProvider(void) {
 
 %hook _TtC26AlignedCuration_CommonImpl21ACUCollectionPlatform
 - (id)stateProvider {
+    keepPlatform(self);
     id provider = %orig;
     keepProvider(provider);
     return provider;
@@ -220,6 +246,63 @@ BOOL SGRArtistFollowing(UIView *page, NSString *moreIdentifier, BOOL *following,
     if (watch.following < 0) return NO;
     if (following) *following = watch.following == 1;
     return YES;
+}
+
+@interface SGROneShotCollectionCheck : NSObject
+@property (nonatomic, strong) id token;
+@property (nonatomic) BOOL done;
+- (void)cancel;
+@end
+
+@implementation SGROneShotCollectionCheck
+- (void)cancel {
+    if ([_token respondsToSelector:@selector(cancel)]) [_token cancel];
+    _token = nil;
+}
+@end
+
+BOOL SGRCollectionAddURL(NSURL *url, BOOL showConfirmation) {
+    if (!url) return NO;
+    id platform = currentPlatform();
+    if (![platform respondsToSelector:@selector(addURL:showUIConfirmation:completion:)]) return NO;
+    [(id<SGRCollectionPlatform>)platform addURL:url showUIConfirmation:showConfirmation completion:nil];
+    return YES;
+}
+
+BOOL SGRCollectionRemoveURL(NSURL *url, BOOL showConfirmation) {
+    if (!url) return NO;
+    id platform = currentPlatform();
+    if (![platform respondsToSelector:@selector(removeURL:showUIConfirmation:completion:)]) return NO;
+    [(id<SGRCollectionPlatform>)platform removeURL:url showUIConfirmation:showConfirmation completion:nil];
+    return YES;
+}
+
+void SGRCollectionCheckSaved(NSURL *url, void (^completion)(BOOL known, BOOL saved)) {
+    if (!completion) return;
+    id provider = url ? currentProvider() : nil;
+    Class stateClass = NSClassFromString(@"SPTCollectionPlatformState");
+    if (!url || !provider || ![stateClass respondsToSelector:@selector(saved)]) {
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(NO, NO); });
+        return;
+    }
+    id savedFlag = [(Class<SGRCollectionState>)stateClass saved];
+    SGROneShotCollectionCheck *box = [SGROneShotCollectionCheck new];
+    box.token = [(id<SGRCollectionStateProvider>)provider subscribeCollectionStateForURL:url completion:^(id state, NSError *error) {
+        BOOL ok = (!error && [state respondsToSelector:@selector(contains:)]);
+        BOOL isSaved = ok ? [(id<SGRCollectionState>)state contains:savedFlag] : NO;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (box.done) return;
+            box.done = YES;
+            [box cancel];
+            completion(ok, isSaved);
+        });
+    }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (box.done) return;
+        box.done = YES;
+        [box cancel];
+        completion(NO, NO);
+    });
 }
 
 %ctor {

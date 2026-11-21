@@ -38,8 +38,8 @@
 static const CGFloat kLyricsGlyphSize = 20;
 // Filled and at full strength while the lyrics are up, the way the Music app marks the control that is on.
 static NSString *const kLyricsSymbol = @"quote.bubble", *const kLyricsSymbolOpen = @"quote.bubble.fill";
-// Where the three glyphs sit, as parts of the footer's width.
-static const CGFloat kLeading = 0.2, kMiddle = 0.5, kTrailing = 0.8;
+// Where the three glyphs sit, as parts of the footer's width (matching Apple Music's ~80.7 pt inset from edges).
+static const CGFloat kLeading = 0.207, kMiddle = 0.5, kTrailing = 0.793;
 static const CGFloat kGlyphMaxWidth = 30;
 
 // Issue #54: Spotify ends its bottom stack 61pt above the screen's bottom (01.txt:127, 576.67 + 236 of
@@ -59,8 +59,10 @@ static const CGFloat kVolumeLift = 10;
 static NSString *const kConnectSymbol = @"airplayaudio", *const kQueueSymbol = @"list.bullet";
 
 static char kEncoreKey;
-static char kConnectKey, kShareKey, kTrimmerKey, kSharedByKey, kQueueKey, kQueueIconKey, kLyricsGlyphKey, kReachKey, kRowKey;
+static char kConnectKey, kShareKey, kTrimmerKey, kSharedByKey, kQueueKey, kLyricsGlyphKey, kQueueGlyphKey, kReachKey, kRowKey;
 static __weak SGRGlyphButton *sg_lyricsGlyph;
+static __weak SGRGlyphButton *sg_queueGlyph;
+static __weak UIView *sg_footerRow;
 
 // The view the footer's stack view arranges around `view`.
 static UIView *arrangedAround(UIView *view, UIView *host) {
@@ -140,6 +142,9 @@ void SGRPlayerLyricsChanged(void) {
     void (^mark)(void) = ^{
         glyph.enabled = enabled;
         glyph.glyph.tintColor = open ? SGRPrimary() : SGRSecondary();
+        glyph.backgroundColor = open ? [UIColor colorWithWhite:1.0 alpha:0.18] : UIColor.clearColor;
+        glyph.layer.cornerRadius = glyph.bounds.size.height > 0 ? glyph.bounds.size.height / 2.0 : 22.0;
+        glyph.clipsToBounds = YES;
         ((SPTEncoreIconView *)objc_getAssociatedObject(glyph, &kEncoreKey)).foregroundColor = glyph.glyph.tintColor;
     };
     if (animated) SGRAnimate(SGRMotionFade, mark, nil);
@@ -160,9 +165,117 @@ SGRGlyphButton *SGRPlayerLyricsGlyphIn(UIView *host) {
     return glyph;
 }
 
+#pragma mark - queue
+
+static UIImage *SGRQueueActiveKnockoutIconImage(CGSize size) {
+    static UIImage *cached = nil;
+    static CGSize cachedSize = {0, 0};
+    if (cached && CGSizeEqualToSize(cachedSize, size)) return cached;
+
+    UIGraphicsImageRendererFormat *fmt = [UIGraphicsImageRendererFormat preferredFormat];
+    fmt.opaque = NO;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size format:fmt];
+    UIImage *img = [renderer imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+        CGContextRef cg = ctx.CGContext;
+        CGRect rect = CGRectMake(0, 0, size.width, size.height);
+        UIBezierPath *circle = [UIBezierPath bezierPathWithOvalInRect:rect];
+        [[UIColor colorWithWhite:1.0 alpha:0.65] setFill];
+        [circle fill];
+
+        // Knockout SF Symbol list.bullet using kCGBlendModeDestinationOut + template alpha mask
+        // (kCGBlendModeClear in Quartz clears the entire rectangular bounding box instead of masking by alpha)
+        UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:19.8 weight:UIImageSymbolWeightMedium];
+        UIImage *sym = [[UIImage systemImageNamed:kQueueSymbol withConfiguration:cfg] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        if (sym) {
+            CGRect symRect = CGRectMake((size.width - sym.size.width) * 0.5,
+                                        (size.height - sym.size.height) * 0.5,
+                                        sym.size.width,
+                                        sym.size.height);
+            CGContextSetBlendMode(cg, kCGBlendModeDestinationOut);
+            [[UIColor colorWithWhite:0.0 alpha:1.0] setFill];
+            [sym drawInRect:symRect];
+        }
+    }];
+    cached = [img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
+    cachedSize = size;
+    return cached;
+}
+
+UIImage *SGRPlayerQueueActiveIcon(CGSize size) {
+    return SGRQueueActiveKnockoutIconImage(size);
+}
+
+UIView *SGRPlayerFooterRow(void) {
+    return sg_footerRow;
+}
+
+void SGRPlayerTriggerConnect(void) {
+    UIView *row = sg_footerRow;
+    if (!row) return;
+    UIView *connect = SGRFindByIdentifier(row, @"Components.ConnectButtonOutputSwitcher", &kConnectKey);
+    if (connect) SGRActivate(connect);
+}
+
+static char kQueueWasOpenKey;
+
+void SGRPlayerQueueChanged(void) {
+    SGRPlayerMotionLyricsChanged();
+    SGRPlayerVisualiserUpdate();
+    SGRPlayerControlsQueueChanged();
+    SGRGlyphButton *glyph = sg_queueGlyph;
+    if (!glyph) return;
+    BOOL open = SGRPlayerQueueOpen();
+    NSNumber *wasOpen = objc_getAssociatedObject(glyph, &kQueueWasOpenKey);
+    if (wasOpen && wasOpen.boolValue == open) return;
+    objc_setAssociatedObject(glyph, &kQueueWasOpenKey, @(open), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    BOOL animated = glyph.window && !SGRPlayerIsTransitioning();
+    void (^mark)(void) = ^{
+        glyph.opaque = NO;
+        glyph.layer.opaque = NO;
+        glyph.glyph.opaque = NO;
+        glyph.glyph.layer.opaque = NO;
+        if (open) {
+            glyph.glyph.image = SGRQueueActiveKnockoutIconImage(CGSizeMake(38.0, 38.0));
+            glyph.glyph.tintColor = nil;
+            glyph.backgroundColor = UIColor.clearColor;
+            glyph.layer.compositingFilter = nil;
+        } else {
+            glyph.glyph.image = [UIImage systemImageNamed:kQueueSymbol withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:kLyricsGlyphSize weight:UIImageSymbolWeightRegular]];
+            glyph.glyph.tintColor = [UIColor colorWithWhite:1.0 alpha:0.65];
+            glyph.backgroundColor = UIColor.clearColor;
+            glyph.layer.compositingFilter = nil;
+        }
+        glyph.layer.cornerRadius = 19.0;
+        glyph.layer.cornerCurve = kCACornerCurveContinuous;
+        glyph.clipsToBounds = YES;
+        [glyph setNeedsLayout];
+        [glyph layoutIfNeeded];
+    };
+    if (animated) SGRAnimate(SGRMotionFade, mark, nil);
+    else mark();
+}
+
+void SGRPlayerLayoutFooterForQueue(void) {
+    UIView *row = sg_footerRow;
+    if (row) SGRPlayerLowerRow(row);
+}
+
+SGRGlyphButton *SGRPlayerQueueGlyphIn(UIView *host) {
+    SGRGlyphButton *glyph = objc_getAssociatedObject(host, &kQueueGlyphKey);
+    if (!glyph) {
+        glyph = [SGRGlyphButton buttonWithSymbol:kQueueSymbol pointSize:kLyricsGlyphSize title:@"Queue"];
+        glyph.onTap = ^{ SGRPlayerToggleQueue(); };
+        objc_setAssociatedObject(host, &kQueueGlyphKey, glyph, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (glyph.superview != host) [host addSubview:glyph];
+    sg_queueGlyph = glyph;
+    return glyph;
+}
+
 #pragma mark - the Music app's glyphs
 
-static char kStandInKey, kClearKey, kQueueActiveColorKey;
+static char kStandInKey, kClearKey;
 
 // The Kit's glyph centered inside `drawn`: it takes `drawn`'s hidden, alpha and animations with it.
 static SGRGlyphView *standIn(UIView *drawn, NSString *symbol) {
@@ -172,7 +285,7 @@ static SGRGlyphView *standIn(UIView *drawn, NSString *symbol) {
         glyph = [[SGRGlyphView alloc] initWithSymbol:symbol pointSize:kLyricsGlyphSize weight:UIImageSymbolWeightRegular];
         glyph.userInteractionEnabled = NO;
         glyph.isAccessibilityElement = NO;
-        glyph.tintColor = SGRSecondary();   // at rest, as the Lyrics glyph while it is off
+        glyph.tintColor = [UIColor colorWithWhite:1.0 alpha:0.65];   // neutral translucent white matching lyrics
         // Kept centered when Spotify resizes the view between the footer's passes (a new Connect image of another size).
         glyph.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin
                                | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
@@ -184,42 +297,16 @@ static SGRGlyphView *standIn(UIView *drawn, NSString *symbol) {
     return glyph;
 }
 
-// The color Spotify drew its glyph in (SGRPlayerImageInk, kept on the image, so an image Spotify hands over again costs
-// a lookup). One drawn from the tint answers the tint.
-static UIColor *inkOf(UIImageView *view, UIImage *image) {
-    if (image.isSymbolImage || image.renderingMode == UIImageRenderingModeAlwaysTemplate) return view.tintColor;
-    return SGRPlayerImageInk(image) ?: SGRPrimary();
-}
-
-// A lit glyph as a bitmap in its color, the way Spotify draws its own: Follow the cover finds lit controls by their
-// pixels, and a symbol image has none to read. The symbol's alignment insets are kept, so it sits where it did.
-// Drawn in the glyph's traits (Bold Text, contrast), as its template image is.
-static UIImage *litImage(SGRGlyphView *glyph, UIImage *symbol, UIColor *color) {
-    UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat formatForTraitCollection:glyph.traitCollection];
-    format.scale = symbol.scale;
-    UIImage *tinted = [symbol imageWithTintColor:color renderingMode:UIImageRenderingModeAlwaysOriginal];
-    __block UIImage *bitmap;
-    [glyph.traitCollection performAsCurrentTraitCollection:^{
-        bitmap = [[[UIGraphicsImageRenderer alloc] initWithSize:symbol.size format:format] imageWithActions:^(UIGraphicsImageRendererContext *context) {
-            [tinted drawAtPoint:CGPointZero];
-        }];
-    }];
-    return [bitmap imageWithAlignmentRectInsets:symbol.alignmentRectInsets];
-}
-
-// Spotify's new Connect glyph: its color onto the stand-in, drawn into the stand-in's image so Follow the cover
-// repaints it the way it did Spotify's, and a clear image of the same size in its place, so nothing moves.
+// Spotify's new Connect glyph: matches the left Lyrics icon in neutral translucent white (rgba(255, 255, 255, 0.65)),
+// and a clear image of the same size in its place, so nothing moves.
 static void takeConnectImage(UIImageView *drawn) {
     UIImage *image = drawn.image;
     UIImage *clear = objc_getAssociatedObject(drawn, &kClearKey);
     if (!image.CGImage || image == clear) return;
     SGRGlyphView *glyph = objc_getAssociatedObject(drawn, &kStandInKey);
     UIImage *symbol = [UIImage systemImageNamed:glyph.symbol withConfiguration:glyph.preferredSymbolConfiguration];
-    UIColor *ink = inkOf(drawn, image);
-    BOOL lit = SGRPlayerAccentLike(ink);
-    glyph.image = lit ? litImage(glyph, symbol, ink) : symbol;
-    // Spotify hands the new image over with no layout pass, so Follow the cover is told here, or a lit glyph keeps the accent.
-    if (lit) SGRPlayerPaintCover(glyph);
+    glyph.image = symbol;
+    glyph.tintColor = [UIColor colorWithWhite:1.0 alpha:0.65];
     if (!clear || !CGSizeEqualToSize(clear.size, image.size) || clear.scale != image.scale) {
         UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
         format.scale = image.scale;
@@ -240,46 +327,6 @@ static void standInForConnect(UIImageView *drawn) {
     if (!made) SGRObserveImage(drawn, ^(UIImageView *view) { takeConnectImage(view); });
 }
 
-// The queue's state as Spotify sets it, for the stand-in; Spotify's own glyph is drawn in clear.
-static void tintQueueStandIn(SPTEncoreIconView *icon) {
-    SGRGlyphView *glyph = objc_getAssociatedObject(icon, &kStandInKey);
-    // Lit by Spotify's own state, not by a color a cover could make look gray. Lit, it is drawn in the color, as Connect
-    // is, so Follow the cover finds it by its pixels and repaints it.
-    UIColor *active = objc_getAssociatedObject(icon, &kQueueActiveColorKey);
-    UIImage *symbol = [UIImage systemImageNamed:glyph.symbol withConfiguration:glyph.preferredSymbolConfiguration];
-    BOOL lit = icon.isActive && active;
-    glyph.image = lit ? litImage(glyph, symbol, active) : symbol;
-    if (lit) SGRPlayerPaintCover(glyph);
-}
-
-static void standInForQueue(SPTEncoreIconView *icon) {
-    if (SGRPlayerSpotifyIcons()) return;
-    if (![icon isKindOfClass:%c(SPTEncoreIconView)]) return;
-    BOOL made = objc_getAssociatedObject(icon, &kStandInKey) != nil;
-    if (!standIn(icon, kQueueSymbol) || made) return;
-    UIColor *color = icon.foregroundColor, *active = icon.activeForegroundColor;
-    // Through the setters below, which now keep each color and hand Spotify's drawing clear.
-    if (color) icon.foregroundColor = color;
-    if (active) icon.activeForegroundColor = active;
-    tintQueueStandIn(icon);
-}
-
-%hook SPTEncoreIconView
-// The stand-in does not take the color at rest, only the active one.
-- (void)setForegroundColor:(UIColor *)color {
-    %orig(objc_getAssociatedObject(self, &kStandInKey) ? UIColor.clearColor : color);
-}
-- (void)setActiveForegroundColor:(UIColor *)color {
-    BOOL ours = objc_getAssociatedObject(self, &kStandInKey) != nil;
-    if (ours) objc_setAssociatedObject(self, &kQueueActiveColorKey, color, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    %orig(ours ? UIColor.clearColor : color);
-    if (ours) tintQueueStandIn(self);
-}
-- (void)setIsActive:(BOOL)active {
-    %orig;
-    if (objc_getAssociatedObject(self, &kStandInKey)) tintQueueStandIn(self);
-}
-%end
 
 #pragma mark - the row
 
@@ -393,13 +440,18 @@ static UIView *rowAbove(UIView *row) {
 
 void SGRPlayerLowerRow(UIView *row) {
     UIView *stack = row.superview, *player = stack.superview;
-    UIWindow *window = row.window;
-    if (![stack isKindOfClass:UIStackView.class] || !player || !window) return;
+    UIWindow *window = row.window ?: player.window;
+    if (![stack isKindOfClass:UIStackView.class] || !player) return;
+    sg_footerRow = row;
+    BOOL queueOpen = SGRPlayerQueueOpen();
     // Where the stack put the row, the row's own transform left out, and where it belongs.
     CGFloat middle = [stack convertPoint:row.center toView:player].y;
     CGFloat height = player.bounds.size.height;
-    CGFloat target = height - MAX(window.safeAreaInsets.bottom + kRowAboveSafeArea, kRowMinBottom);
-    CGFloat move = MAX(0, round(target - middle));
+    CGFloat safeBottom = window ? window.safeAreaInsets.bottom : 34.0;
+    CGFloat aboveSafe = queueOpen ? 32.0 : kRowAboveSafeArea;
+    CGFloat minBottom = queueOpen ? 44.0 : kRowMinBottom;
+    CGFloat target = height - MAX(safeBottom + aboveSafe, minBottom);
+    CGFloat move = queueOpen ? round(target - middle) : MAX(0, round(target - middle));
     CGAffineTransform down = CGAffineTransformMakeTranslation(0, move);
     if (!CGAffineTransformEqualToTransform(row.transform, down)) row.transform = down;
 
@@ -408,20 +460,46 @@ void SGRPlayerLowerRow(UIView *row) {
     // The ordinary player's controls unit, or the AI DJ's head unit (DJPlayer.x), which holds the same buttons.
     Class unit = unitOf(above).class;
     BOOL controls = SGClassNamed(unit, @"PlaybackControlsElementsUnit") || SGClassNamed(unit, @"DJMHeadUnitViewController");
-    // With the volume row, the controls stay where Spotify put them and the row takes the room the footer leaves.
-    // The volume row is placed against the controls where they would stand for it; one that does not show leaves them
-    // following the footer as they do without it.
-    BOOL volume = SGRPlayerVolumeOn() && controls;
+    UIView *controlsView = controls ? above : nil;
+    if (!controlsView) {
+        for (UIView *sibling in stack.subviews) {
+            Class sibUnit = unitOf(sibling).class;
+            if (SGClassNamed(sibUnit, @"PlaybackControlsElementsUnit") || SGClassNamed(sibUnit, @"DJMHeadUnitViewController")) {
+                controlsView = sibling;
+                break;
+            }
+        }
+    }
+    BOOL volume = SGRPlayerVolumeOn() && (controls || (queueOpen && controlsView != nil));
     CGFloat share = volume ? 0 : kControlsShare, lift = volume ? kVolumeLift : 0;
-    CGAffineTransform follow = CGAffineTransformMakeTranslation(0, controls ? round(move * share) - lift : 0);
-    if (above && controls && !CGAffineTransformEqualToTransform(above.transform, follow)) above.transform = follow;
+
+    if (queueOpen && controlsView) {
+        // In Queue view, center the 3-button transport row at Apple Music's y = 638.2 pt (height - (171.8 + safeBottom) on 844pt)
+        CGFloat ctrlMiddle = [stack convertPoint:controlsView.center toView:player].y;
+        CGFloat targetCtrlMiddle = height - (175.6 + safeBottom);
+        CGAffineTransform queueFollow = CGAffineTransformMakeTranslation(0, round(targetCtrlMiddle - ctrlMiddle));
+        if (!CGAffineTransformEqualToTransform(controlsView.transform, queueFollow)) controlsView.transform = queueFollow;
+    } else {
+        if (!controls && controlsView && !CGAffineTransformIsIdentity(controlsView.transform)) {
+            controlsView.transform = CGAffineTransformIdentity;
+        }
+        // With the volume row, the controls stay where Spotify put them and the row takes the room the footer leaves.
+        // The volume row is placed against the controls where they would stand for it; one that does not show leaves them
+        // following the footer as they do without it.
+        CGAffineTransform follow = CGAffineTransformMakeTranslation(0, controls ? round(move * share) - lift : 0);
+        if (above && controls && !CGAffineTransformEqualToTransform(above.transform, follow)) above.transform = follow;
+    }
     SGRPlayerPaintCover(stack);
-    if (volume && !SGRPlayerPlaceVolume(stack, above, row, kVolumeMargin)) {
-        share = kControlsShare;
-        follow = CGAffineTransformMakeTranslation(0, round(move * share));
-        if (!CGAffineTransformEqualToTransform(above.transform, follow)) above.transform = follow;
+    UIView *volumeAnchor = queueOpen ? (controlsView ?: above) : above;
+    CGFloat vMargin = queueOpen ? 32.0 : kVolumeMargin;
+    if (volume && !SGRPlayerPlaceVolume(stack, volumeAnchor, row, vMargin)) {
+        if (!queueOpen) {
+            share = kControlsShare;
+            CGAffineTransform follow = CGAffineTransformMakeTranslation(0, round(move * share));
+            if (above && controls && !CGAffineTransformEqualToTransform(above.transform, follow)) above.transform = follow;
+        }
     } else if (!volume) {
-        SGRPlayerPlaceVolume(stack, nil, row, kVolumeMargin);
+        SGRPlayerPlaceVolume(stack, nil, row, vMargin);
     }
 
     SGRFooterReach *reach = objc_getAssociatedObject(row, &kReachKey);
@@ -479,8 +557,16 @@ void SGRPlayerLowerRow(UIView *row) {
     CGFloat connectFrom = glyph ? SGRPlayerTranslateArranged(arrangedAround(connect, host), glyph, CGPointMake(CGRectGetMidX(glyph.bounds), CGRectGetMidY(glyph.bounds)), host, round(width * kMiddle)) : -1;
 
     UIView *queue = SGRFindByIdentifier(host, @"QueueButtonNowPlaying", &kQueueKey);
-    standInForQueue((SPTEncoreIconView *)SGRFindByIdentifier(queue, @"Encore.IconView", &kQueueIconKey));
-    CGFloat queueFrom = SGRPlayerTranslateArranged(arrangedAround(queue, host), queue, CGPointMake(CGRectGetMidX(queue.bounds), CGRectGetMidY(queue.bounds)), host, round(width * (rtl ? kLeading : kTrailing)));
+    SGRPlayerVanish(queue);
+    SGRPlayerVanish(arrangedAround(queue, host));
+
+    SGRGlyphButton *queueButton = SGRPlayerQueueGlyphIn(host);
+    queueButton.bounds = CGRectMake(0, 0, 38, 38);
+    queueButton.center = CGPointMake(round(width * (rtl ? kLeading : kTrailing)), middleY);
+    if (SGRPlayerSpotifyIcons()) {
+        SGRPlayerEncoreGlyphIn(queueButton, @"queue").transform = CGAffineTransformMakeScale(0.85, 0.85);
+    }
+    SGRPlayerQueueChanged();
 
     SGRPlayerLowerRow(host);
     SGRPlayerCoverConnect(arrangedAround(connect, host), glyph);
@@ -488,7 +574,7 @@ void SGRPlayerLowerRow(UIView *row) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         SGLog(@"redesign player: footer lyrics at %.0f, connect %.0f (%@) to %.0f, queue %.0f to %.0f, share %@", lyrics.center.x,
-              connectFrom, glyph ? @"glyph" : @"button", round(width * kMiddle), queueFrom, round(width * (rtl ? kLeading : kTrailing)), share ? @"gone" : @"not found");
+              connectFrom, glyph ? @"glyph" : @"button", round(width * kMiddle), queueButton.center.x, round(width * (rtl ? kLeading : kTrailing)), share ? @"gone" : @"not found");
     });
 }
 %end
@@ -538,5 +624,5 @@ static char kGlyphSeenKey;
     if (!SGRedesignedUI()) return;
     %init;
     if (SGRPlayerVolumeOn()) %init(VolumeSlider);
-    SGRequireClasses(@[@"_TtC20NowPlaying_ModesImpl18FooterElementsUnit", @"SPTEncoreIconView"]);
+    SGRequireClasses(@[@"_TtC20NowPlaying_ModesImpl18FooterElementsUnit"]);
 }

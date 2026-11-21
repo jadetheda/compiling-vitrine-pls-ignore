@@ -22,8 +22,9 @@ static const CGFloat kPausedScale = 0.84;
 // The bar's 40pt cover lives in a tilt view of its own; the player's is 354.
 static const CGFloat kCoverMinWidth = 200;
 
-static char kPlateKey;
+static char kPlateKey, kPodcastCoverKey;
 static NSHashTable<UIView *> *sg_tilts;
+static __weak UICollectionView *sg_accessibleList;
 // The cover of each tilt view once found. A frame Spotify sets on a scaled view becomes its scaled
 // size, leaving bounds that no longer match the tilt view's, so the cover is not looked for by size again.
 static NSMapTable<UIView *, UIView *> *sg_covers;
@@ -48,12 +49,24 @@ static UIView *coverIn(UIView *tilt) {
 }
 
 static BOOL inCoverCell(UIView *tilt) {
-    static Class cell;
+    static Class cell, listClass;
     if (!cell) cell = NSClassFromString(@"_TtC28NowPlaying_ContentLayersImpl16CoverArtCellImpl");
+    if (!listClass) listClass = NSClassFromString(@"_TtC35NowPlaying_ContentLayerPlatformImpl24AccessibleCollectionView");
     for (UIView *v = tilt.superview; v; v = v.superview) {
-        if ([v isKindOfClass:cell]) return YES;
+        if ((cell && [v isKindOfClass:cell]) || (listClass && [v isKindOfClass:listClass])) return YES;
     }
     return NO;
+}
+
+static UIView *showingFallbackCoverInList(UICollectionView *list) {
+    if (!list || !list.window) return nil;
+    CGFloat midX = CGRectGetMidX(list.bounds);
+    for (UIView *cell in list.subviews) {
+        if (cell.hidden || ![cell isKindOfClass:UICollectionViewCell.class] || fabs(CGRectGetMidX(cell.frame) - midX) > 20.0) continue;
+        UIView *holder = SGRFindByIdentifier(cell, @"Encore.ImageView", &kPodcastCoverKey);
+        if (holder && holder.bounds.size.width >= kCoverMinWidth) return holder;
+    }
+    return nil;
 }
 
 static void scaleCover(UIView *tilt, CGFloat scale) {
@@ -85,12 +98,13 @@ UIView *SGRPlayerCoverList(void) {
     for (UIView *v = showingTilt(); v; v = v.superview) {
         if ([v isKindOfClass:UICollectionView.class]) return v;
     }
+    if (sg_accessibleList && sg_accessibleList.window) return sg_accessibleList;
     return nil;
 }
 
 CGRect SGRPlayerCoverFrameIn(UIView *host) {
     UIView *tilt = showingTilt();
-    UIView *cover = coverIn(tilt);
+    UIView *cover = coverIn(tilt) ?: showingFallbackCoverInList(sg_accessibleList);
     // The cover's own transform is the paused shrink, which is what the eye sees it at.
     return cover && host ? [host convertRect:cover.bounds fromView:cover] : CGRectNull;
 }
@@ -124,9 +138,9 @@ void SGRPlayerSetCoverHidden(BOOL hidden) {
     sg_coverKeptHidden = hidden;
     if (!hidden) return;
     UIView *tilt = showingTilt();
-    UIView *cover = coverIn(tilt);
+    UIView *cover = coverIn(tilt) ?: showingFallbackCoverInList(sg_accessibleList);
     if (!cover) return;
-    UIView *plate = SGRShadowPlateIn(tilt, &kPlateKey);
+    UIView *plate = tilt ? SGRShadowPlateIn(tilt, &kPlateKey) : nil;
     cover.alpha = 0;
     plate.alpha = 0;
     sg_hiddenCover = cover;
@@ -337,6 +351,20 @@ static UIView *coverOfImage(UIView *image) {
 }
 %end
 
+
+%hook _TtC35NowPlaying_ContentLayerPlatformImpl24AccessibleCollectionView
+- (void)layoutSubviews {
+    %orig;
+    sg_accessibleList = (UICollectionView *)self;
+    if (sg_coverKeptHidden && !showingTilt()) {
+        UIView *fallback = showingFallbackCoverInList(sg_accessibleList);
+        if (fallback && fallback != sg_hiddenCover) {
+            fallback.alpha = 0;
+            sg_hiddenCover = fallback;
+        }
+    }
+}
+%end
 
 @interface SGRPlayerArtworkWatcher : NSObject <SGPlayerStateObserver>
 @end

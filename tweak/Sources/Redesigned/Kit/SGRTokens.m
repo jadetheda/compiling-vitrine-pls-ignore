@@ -18,9 +18,9 @@ const NSTimeInterval SGRCrossfade = 0.35;
 
 // A layout spring settles in about this long without overshooting; a press gives a little back.
 static const NSTimeInterval kLayoutDuration = 0.45, kPressDuration = 0.32;
-// The tab bar's minimize runs on every scroll, so it is quicker than the 0.3 to 0.4 s Apple gives a
-// repositioning spring.
-static const NSTimeInterval kBarDuration = 0.26;
+// The tab bar's minimize runs on every scroll, matching Apple Music's physical Liquid Glass spring.
+static const NSTimeInterval kBarDuration = 0.38;
+static const CGFloat kBarDamping = 0.88;
 static const CGFloat kPressDamping = 0.62;
 // A response lands within the press feedback's budget, on a curve that is most of the way there at once.
 static const NSTimeInterval kRespondDuration = 0.2;
@@ -122,7 +122,7 @@ void SGRAnimate(SGRMotion motion, void (^animations)(void), void (^completion)(B
             [UIView animateWithDuration:kLayoutDuration delay:0 usingSpringWithDamping:1 initialSpringVelocity:0 options:options animations:animations completion:completion];
             break;
         case SGRMotionBar:
-            [UIView animateWithDuration:kBarDuration delay:0 usingSpringWithDamping:1 initialSpringVelocity:0 options:options animations:animations completion:completion];
+            [UIView animateWithDuration:kBarDuration delay:0 usingSpringWithDamping:kBarDamping initialSpringVelocity:0 options:options animations:animations completion:completion];
             break;
         case SGRMotionPress:
             [UIView animateWithDuration:kPressDuration delay:0 usingSpringWithDamping:kPressDamping initialSpringVelocity:0 options:options animations:animations completion:completion];
@@ -134,7 +134,7 @@ void SGRAnimate(SGRMotion motion, void (^animations)(void), void (^completion)(B
             // UIView's own curves are too soft for this; a property animator takes any curve, and like the
             // others it starts from what is on screen, so it can take over a fade halfway out.
             UICubicTimingParameters *curve = [[UICubicTimingParameters alloc] initWithControlPoint1:CGPointMake(0.23, 1)
-                                                                                     controlPoint2:CGPointMake(0.32, 1)];
+                                                                                      controlPoint2:CGPointMake(0.32, 1)];
             UIViewPropertyAnimator *animator = [[UIViewPropertyAnimator alloc] initWithDuration:kRespondDuration timingParameters:curve];
             [animator addAnimations:animations];
             if (completion) [animator addCompletion:^(UIViewAnimatingPosition position) { completion(position == UIViewAnimatingPositionEnd); }];

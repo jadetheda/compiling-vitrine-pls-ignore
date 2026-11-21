@@ -41,3 +41,12 @@ static inline bool SGRMinimizeStepEx(SGRMinimizeTrack *track, CGFloat offset, CG
 static inline bool SGRMinimizeStep(SGRMinimizeTrack *track, CGFloat offset, CGFloat top, CGFloat bottom) {
     return SGRMinimizeStepEx(track, offset, top, bottom, true);
 }
+
+// Interactive pre-minimize scroll progress (0 at rest, up to 1 right before SGRMinimizeStep flips to minimized)
+// while expanded and scrolling down.
+static inline CGFloat SGRMinimizeProgress(const SGRMinimizeTrack *track, CGFloat offset, CGFloat top, CGFloat bottom) {
+    if (track->minimized || bottom - top < kSGRMinimizeRange) return 0;
+    offset = fmin(fmax(offset, top), bottom);
+    if (offset <= top + 1 || offset <= track->turn) return 0;
+    return fmin(1, fmax(0, (offset - track->turn) / kSGRMinimizeTravel));
+}
