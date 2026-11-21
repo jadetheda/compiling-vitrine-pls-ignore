@@ -618,11 +618,74 @@ static char kGlyphSeenKey;
     SGRPlayerVolumeSliderSet(self);
 }
 %end
+
+%hook _TtC18Connect_VolumeImpl17VolumeServiceImpl
+- (id)provideVolumeImpl {
+    id volume = %orig;
+    SGRPlayerConnectVolumeProvided(volume);
+    return volume;
+}
+%end
+
+%hook _TtC18Connect_VolumeImpl10VolumeImpl
+- (void)add:(id)observer {
+    %orig;
+    SGRPlayerConnectVolumeProvided(self);
+}
+%end
+
+%hook _TtC22Connect_AggregatorImpl24ConnectAggregatorService
+- (id)provideConnectAggregatorLegacyAPI {
+    id aggregator = %orig;
+    SGRPlayerConnectAggregatorProvided(aggregator);
+    return aggregator;
+}
+%end
+
+%hook _TtC18Connect_VolumeImpl21AggregatorEventSource
+- (void)aggregator:(id)aggregator didUpdateActiveConnectEntity:(id)entity {
+    %orig;
+    SGRPlayerConnectEntityChanged(aggregator, entity);
+}
+%end
+
+%hook _TtC20Connect_VolumeUXImpl21VolumeUXPresenterImpl
+- (void)systemVolumeChangedTo:(double)volume {
+    if (SGRPlayerConnectVolumeActive()) return;
+    %orig;
+}
+%end
+
+%hook _TtC20Connect_VolumeUXImpl28SmartControlVolumeController
+- (void)systemVolumeChangedTo:(double)volume {
+    if (SGRPlayerConnectVolumeActive()) return;
+    %orig;
+}
+%end
+
+%hook _TtC20Connect_VolumeUXImpl27RemoteVolumePopupController
+- (void)remoteMediaSessionVolumeDidChangeToValue:(double)volume {
+    if (SGRPlayerConnectVolumeActive()) return;
+    %orig;
+}
+%end
 %end
 
 %ctor {
     if (!SGRedesignedUI()) return;
     %init;
-    if (SGRPlayerVolumeOn()) %init(VolumeSlider);
+    if (SGRPlayerVolumeOn()) {
+        %init(VolumeSlider);
+        SGRPlayerConnectVolumeInit();
+        SGRequireClasses(@[
+            @"_TtC18Connect_VolumeImpl10VolumeImpl",
+            @"_TtC18Connect_VolumeImpl17VolumeServiceImpl",
+            @"_TtC18Connect_VolumeImpl21AggregatorEventSource",
+            @"_TtC20Connect_VolumeUXImpl21VolumeUXPresenterImpl",
+            @"_TtC20Connect_VolumeUXImpl27RemoteVolumePopupController",
+            @"_TtC20Connect_VolumeUXImpl28SmartControlVolumeController",
+            @"_TtC22Connect_AggregatorImpl24ConnectAggregatorService",
+        ]);
+    }
     SGRequireClasses(@[@"_TtC20NowPlaying_ModesImpl18FooterElementsUnit"]);
 }

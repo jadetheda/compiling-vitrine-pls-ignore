@@ -23,10 +23,16 @@ CFTimeInterval SGPlayerTransitionEnds(void) {
 static void announceTransition(UIViewController *unit, BOOL animated, BOOL opens) {
     BOOL wasOpen = sg_open;
     sg_open = opens;
-    id<UIViewControllerTransitionCoordinator> coordinator = unit.transitionCoordinator;
-    if (!animated || !coordinator) return;
-    NSTimeInterval duration = MAX(0.1, coordinator.transitionDuration);
     NSUInteger generation = ++sg_transitionGeneration;
+    id<UIViewControllerTransitionCoordinator> coordinator = unit.transitionCoordinator;
+    if (!animated || !coordinator) {
+        sg_transitionEnds = 0;
+        if (wasOpen != opens) {
+            [NSNotificationCenter.defaultCenter postNotificationName:SGPlayerTransitionEndedNotification object:nil];
+        }
+        return;
+    }
+    NSTimeInterval duration = MAX(0.1, coordinator.transitionDuration);
     sg_transitionEnds = CACurrentMediaTime() + duration;
     [NSNotificationCenter.defaultCenter postNotificationName:SGPlayerTransitionNotification object:nil];
     [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
