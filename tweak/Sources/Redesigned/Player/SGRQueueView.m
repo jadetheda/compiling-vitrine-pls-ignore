@@ -1266,7 +1266,7 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     if (_historyClearedByUser) return;
     if (!_isShuffling && _contextEntries.count > 0 && _nowPlayingItem) {
         NSInteger idx = [self indexOfItem:_nowPlayingItem inContextEntries:_contextEntries];
-        if (idx > 0) {
+        if (idx != NSNotFound && idx > 0 && (NSUInteger)idx <= _contextEntries.count) {
             [_historyItems removeAllObjects];
             for (NSInteger i = 0; i < idx; i++) {
                 SGRQueueItem *it = [self itemFromContextEntry:_contextEntries[(NSUInteger)i] index:(NSUInteger)i];
