@@ -33,6 +33,8 @@
 #import "Redesigned/Kit/SGRKit.h"
 #import "Headers/SPTEncoreIconView.h"
 #import "Player.h"
+#import "Shared/Navigation/TabIcons.h"
+#import <AVFoundation/AVFoundation.h>
 #import <objc/message.h>
 
 static const CGFloat kLyricsGlyphSize = 20;
@@ -57,6 +59,7 @@ static const CGFloat kVolumeLift = 10;
 
 // "airplayaudio" is the name iOS 16 knows; iOS 18 calls it airplay.audio and keeps this one as its alias.
 static NSString *const kConnectSymbol = @"airplayaudio", *const kQueueSymbol = @"list.bullet";
+static NSString *const kSharedAudioSymbol = @"person.2.fill";
 
 static char kEncoreKey;
 static char kConnectKey, kShareKey, kTrimmerKey, kSharedByKey, kQueueKey, kLyricsGlyphKey, kQueueGlyphKey, kReachKey, kRowKey;
@@ -275,7 +278,7 @@ SGRGlyphButton *SGRPlayerQueueGlyphIn(UIView *host) {
 
 #pragma mark - the Music app's glyphs
 
-static char kStandInKey, kClearKey;
+static char kStandInKey, kClearKey, kConnectLitKey, kConnectInkKey, kConnectNameKey;
 
 // The Kit's glyph centered inside `drawn`: it takes `drawn`'s hidden, alpha and animations with it.
 static SGRGlyphView *standIn(UIView *drawn, NSString *symbol) {
@@ -297,16 +300,378 @@ static SGRGlyphView *standIn(UIView *drawn, NSString *symbol) {
     return glyph;
 }
 
+static NSString *const kSpeakerSymbol = @"hifispeaker.fill";
+static NSHashTable<UIImageView *> *sg_connectViews;
+static NSString *sg_routeSymbol;
+static NSString *sg_routePortName;
+static BOOL sg_routeIsAirPlay;
+static BOOL sg_routeIsLocalAccessory;
+static __weak id sg_connectAggregator;
+// What MediaPlayer names the active route's glyph (fetchAppleRouteSymbol), nil until it answers or when it cannot.
+static NSString *sg_appleRouteSymbol;
+static NSUInteger sg_appleRouteRequest;
+static NSString *sg_routeUID;   // the first output's, to tell another device from the same one with a new category
+
+// NULL-terminated substring -> SF Symbol rule; matched case-insensitively with zero allocations.
+typedef struct {
+    __unsafe_unretained NSString *needle, *primary, *fallback;
+} SGRSymbolRule;
+
+// A symbol by name, drawn in `config`. A public one loads as it always did here; any other (the system loads a route's glyph
+// with _systemImageNamed:, so some are private) goes through the tabs' lookup, with `config` on top, since the Kit's own
+// finds public names only. A template, as the tabs draw every symbol (symbolView in TabIcons.m), so the glyph's tint reaches it.
+static UIImage *routeGlyph(NSString *name, UIImageSymbolConfiguration *config) {
+    if (!name.length) return nil;
+    UIImage *image = [UIImage systemImageNamed:name withConfiguration:config];
+    if (!image) {
+        image = SGSymbolImage(name);
+        if (image && config) image = [image imageByApplyingSymbolConfiguration:config] ?: image;
+    }
+    return [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+// Whether a name draws. A hit is remembered: the footer asks on every layout pass.
+static BOOL symbolDraws(NSString *name) {
+    if (!name.length) return NO;
+    static NSMutableSet<NSString *> *drawn;
+    if ([drawn containsObject:name]) return YES;
+    UIImage *image = routeGlyph(name, nil);
+    if (!image) return NO;
+    if (!drawn) drawn = [NSMutableSet set];
+    [drawn addObject:name];
+    if (![UIImage systemImageNamed:name]) {
+        SGLog(@"redesign player: %@ is not a public symbol; loaded %@, symbol image %d", name, NSStringFromCGSize(image.size), image.isSymbolImage);
+    }
+    return YES;
+}
+
+static NSString *firstSymbol(NSString *primary, NSString *fallback, NSString *defaultSymbol) {
+    if (symbolDraws(primary)) return primary;
+    if (symbolDraws(fallback)) return fallback;
+    return defaultSymbol;
+}
+
+static NSString *matchSymbol(NSString *haystack, const SGRSymbolRule *rules, NSString *defaultSymbol) {
+    if (!haystack.length) return defaultSymbol;
+    for (const SGRSymbolRule *r = rules; r->needle; r++) {
+        if ([haystack rangeOfString:r->needle options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            return firstSymbol(r->primary, r->fallback, defaultSymbol);
+        }
+    }
+    return defaultSymbol;
+}
+
+// Apple's own per-product symbols (SF Symbols 7), most specific first. The second name is the older spelling, for an iOS
+// without the first. SF Symbols has no Bluetooth glyph and cannot tell a pair of earbuds from a speaker by its port, so any
+// other device gets the speaker the system's picker uses for one it does not know.
+static NSString *bluetoothSymbol(NSString *portName) {
+    static const SGRSymbolRule rules[] = {
+        {@"airpods max",              @"airpods.max",          @"airpodsmax"},
+        {@"airpods pro",              @"airpods.pro",          @"airpodspro"},
+        {@"airpods 4",                @"airpods.gen4",         @"airpods.gen3"},
+        {@"airpods (4",               @"airpods.gen4",         @"airpods.gen3"},
+        {@"airpods 3",                @"airpods.gen3",         nil},
+        {@"airpods (3",               @"airpods.gen3",         nil},
+        {@"airpods",                  @"airpods",              nil},
+        {@"powerbeats pro 2",         @"beats.powerbeats.pro.2", @"beats.powerbeats.pro"},
+        {@"powerbeats pro",           @"beats.powerbeats.pro", @"beats.powerbeatspro"},
+        {@"powerbeats3",              @"beats.powerbeats3",    @"beats.powerbeats"},
+        {@"powerbeats",               @"beats.powerbeats",     @"beats.earphones"},
+        {@"beats fit pro",            @"beats.fit.pro",        @"beats.fitpro"},
+        {@"beats studio buds +",      @"beats.studiobuds.plus", @"beats.studiobudsplus"},
+        {@"beats studio buds+",       @"beats.studiobuds.plus", @"beats.studiobudsplus"},
+        {@"beats studio buds plus",   @"beats.studiobuds.plus", @"beats.studiobudsplus"},
+        {@"beats studio buds",        @"beats.studiobuds",     nil},
+        {@"beats solo buds",          @"beats.solobuds",       nil},
+        {@"beats pill",               @"beats.pill",           nil},
+        {@"beatsx",                   @"beats.earphones",      nil},
+        {@"beats flex",               @"beats.earphones",      nil},
+        {@"beats",                    @"beats.headphones",     nil},
+        {nil, nil, nil}
+    };
+    return matchSymbol(portName, rules, kSpeakerSymbol);
+}
+
+static NSString *connectDeviceSymbol(NSString *deviceName) {
+    static const SGRSymbolRule rules[] = {
+        {@" + ",          @"hifispeaker.2.fill", nil},
+        {@" & ",          @"hifispeaker.2.fill", nil},
+        {@"multi-room",   @"hifispeaker.2.fill", nil},
+        {@"multiroom",    @"hifispeaker.2.fill", nil},
+        {@"everywhere",   @"hifispeaker.2.fill", nil},
+        {@"speakers",     @"hifispeaker.2.fill", nil},
+        {@"group",        @"hifispeaker.2.fill", nil},
+        {@"homepod mini", @"homepodmini.fill",   @"homepod.mini.fill"},
+        {@"homepod",      @"homepod.fill",       nil},
+        {@"apple tv",     @"appletv.fill",       nil},
+        {@"macbook",      @"laptopcomputer",     nil},
+        {@"laptop",       @"laptopcomputer",     nil},
+        {@"imac",         @"desktopcomputer",    nil},
+        {@"mac mini",     @"desktopcomputer",    nil},
+        {@"mac studio",   @"desktopcomputer",    nil},
+        {@"mac pro",      @"desktopcomputer",    nil},
+        {@"desktop",      @"desktopcomputer",    nil},
+        {@"iphone",       @"iphone",             nil},
+        {@"ipad",         @"ipad",               nil},
+        {@"apple watch",  @"applewatch",         nil},
+        {@"playstation",  @"gamecontroller.fill", nil},
+        {@"ps5",          @"gamecontroller.fill", nil},
+        {@"ps4",          @"gamecontroller.fill", nil},
+        {@"xbox",         @"gamecontroller.fill", nil},
+        {@"chromecast",   @"tv.and.mediabox",    nil},
+        {@"fire tv",      @"tv.and.mediabox",    nil},
+        {@"roku",         @"tv.and.mediabox",    nil},
+        {@"shield",       @"tv.and.mediabox",    nil},
+        {@"tv",           @"tv",                 nil},
+        {nil, nil, nil}
+    };
+    return matchSymbol(deviceName, rules, kSpeakerSymbol);
+}
+
+// Spotify's device types: ConnectAggregatorEntityDeviceType's cases in declaration order from 0. The binary does not show
+// the values themselves, so the log below prints the number the entity reports.
+enum {
+    kConnectUnknown, kConnectComputer, kConnectTablet, kConnectSmartphone, kConnectSpeaker, kConnectTV, kConnectAVR,
+    kConnectSetTopBox, kConnectAudioDongle, kConnectGameConsole, kConnectCastVideo, kConnectCastAudio, kConnectAutomobile,
+    kConnectSmartwatch, kConnectTypeCount
+};
+
+// The glyph for the device Spotify plays on, by what Spotify reports of it: the aggregator's active entity
+// (SPTConnectAggregatorEntity) has a deviceType and an isGroup. The system picker names a third-party route from five types
+// (MediaControls in iOS 27.2, symbolNameForVendorSpecificRoute:): a group is hifispeaker.2.fill, a set-top box
+// tv.and.mediabox, a TV tv, a laptop laptopcomputer, a desktop desktopcomputer, and anything else hifispeaker.fill. Those are
+// used as they are. The types the picker has no glyph for take the symbol of the thing itself (a phone, a tablet, a watch, a
+// car, a console), and a receiver takes the picker's glyph for devices it has no name for, tv.and.hifispeaker.fill
+// (MRUAssetsProvider genericDevices). nil with no entity or a type that says nothing: the name decides then.
+static NSString *connectEntitySymbol(NSString *connectName) {
+    static NSString *const symbols[kConnectTypeCount] = {
+        [kConnectComputer] = @"laptopcomputer", [kConnectTablet] = @"ipad", [kConnectSmartphone] = @"iphone",
+        [kConnectSpeaker] = @"hifispeaker.fill", [kConnectTV] = @"tv", [kConnectAVR] = @"tv.and.hifispeaker.fill",
+        [kConnectSetTopBox] = @"tv.and.mediabox", [kConnectAudioDongle] = @"hifispeaker.fill",
+        [kConnectGameConsole] = @"gamecontroller.fill", [kConnectCastVideo] = @"tv", [kConnectCastAudio] = @"hifispeaker.fill",
+        [kConnectAutomobile] = @"car.fill", [kConnectSmartwatch] = @"applewatch",
+    };
+    id aggregator = sg_connectAggregator;
+    if (![aggregator respondsToSelector:@selector(activeConnectEntity)]) return nil;
+    id entity = ((id (*)(id, SEL))objc_msgSend)(aggregator, @selector(activeConnectEntity));
+    if (![entity respondsToSelector:@selector(deviceType)]) return nil;
+    NSUInteger type = ((NSUInteger (*)(id, SEL))objc_msgSend)(entity, @selector(deviceType));
+    BOOL group = [entity respondsToSelector:@selector(isGroup)] && ((BOOL (*)(id, SEL))objc_msgSend)(entity, @selector(isGroup));
+    NSString *symbol = nil;
+    if (group) {
+        symbol = @"hifispeaker.2.fill";
+    } else if (type < kConnectTypeCount) {
+        symbol = symbols[type];
+        // The name refines the type: a desktop rather than a laptop, an Apple TV rather than a TV.
+        NSString *byName = connectDeviceSymbol(connectName);
+        if (type == kConnectComputer && [byName isEqualToString:@"desktopcomputer"]) symbol = byName;
+        if ((type == kConnectTV || type == kConnectSetTopBox || type == kConnectCastVideo) && [byName isEqualToString:@"appletv.fill"]) symbol = byName;
+    }
+    static NSUInteger loggedType = NSNotFound;
+    static BOOL loggedGroup;
+    if (type != loggedType || group != loggedGroup) {
+        loggedType = type;
+        loggedGroup = group;
+        SGLog(@"redesign player: connect device type %lu%@ -> %@", (unsigned long)type, group ? @", group" : @"", symbol ?: @"by name");
+    }
+    return symbolDraws(symbol) ? symbol : nil;
+}
+
+static NSString *routeSymbolForOutputs(NSArray<AVAudioSessionPortDescription *> *outputs, BOOL *isAirPlay) {
+    if (isAirPlay) *isAirPlay = NO;
+    AVAudioSessionPortDescription *port = outputs.firstObject;
+    if (!port) return kConnectSymbol;
+
+    NSUInteger airplayCount = 0;
+    AVAudioSessionPortDescription *airplayPort = nil;
+    for (AVAudioSessionPortDescription *outPort in outputs) {
+        if ([outPort.portType isEqualToString:AVAudioSessionPortAirPlay]) {
+            airplayCount++;
+            if (!airplayPort) airplayPort = outPort;
+        }
+    }
+    if (airplayCount > 0) {
+        if (isAirPlay) *isAirPlay = YES;
+        if (airplayCount > 1) return firstSymbol(@"hifispeaker.2.fill", nil, kConnectSymbol);
+        static const SGRSymbolRule airplayRules[] = {
+            {@" + ",          @"hifispeaker.2.fill", nil},
+            {@"homepod mini", @"homepodmini.fill",   @"homepod.mini.fill"},
+            {@"homepod",      @"homepod.fill",       nil},
+            {@"apple tv",     @"appletv.fill",       nil},
+            {nil, nil, nil}
+        };
+        return matchSymbol(airplayPort.portName, airplayRules, kConnectSymbol);
+    }
+
+    NSString *type = port.portType;
+    if ([type isEqualToString:AVAudioSessionPortBluetoothA2DP] ||
+        [type isEqualToString:AVAudioSessionPortBluetoothLE] ||
+        [type isEqualToString:AVAudioSessionPortBluetoothHFP]) {
+        return bluetoothSymbol(port.portName);
+    }
+    if ([type isEqualToString:AVAudioSessionPortHeadphones]) return @"headphones";
+    if ([type isEqualToString:AVAudioSessionPortCarAudio])   return firstSymbol(@"car.fill", @"car", kConnectSymbol);
+    if ([type isEqualToString:AVAudioSessionPortHDMI] || [type isEqualToString:AVAudioSessionPortDisplayPort])
+        return firstSymbol(@"tv", @"tv.fill", kConnectSymbol);
+    if ([type isEqualToString:AVAudioSessionPortUSBAudio] || [type isEqualToString:AVAudioSessionPortLineOut])
+        return firstSymbol(@"cable.connector", @"headphones", kConnectSymbol);
+    return kConnectSymbol;
+}
+
+static void refreshRouteSymbol(void) {
+    NSArray<AVAudioSessionPortDescription *> *outputs = AVAudioSession.sharedInstance.currentRoute.outputs;
+    BOOL isAirPlay = NO;
+    sg_routeSymbol = routeSymbolForOutputs(outputs, &isAirPlay);
+    AVAudioSessionPortDescription *first = outputs.firstObject;
+    sg_routePortName = first.portName;
+    sg_routeIsAirPlay = isAirPlay;
+    NSString *pt = first.portType;
+    sg_routeIsLocalAccessory = pt && ![pt isEqualToString:AVAudioSessionPortBuiltInSpeaker] && ![pt isEqualToString:AVAudioSessionPortBuiltInReceiver];
+    // The system's own name for the glyph outranks the guess from the port; the phone's own speaker keeps AirPlay's glyph.
+    if (sg_appleRouteSymbol.length && sg_routeIsLocalAccessory) sg_routeSymbol = sg_appleRouteSymbol;
+}
+
+static BOOL isRemoteConnectTarget(NSString *connectName) {
+    id aggregator = sg_connectAggregator;
+    if (aggregator && [aggregator respondsToSelector:@selector(isPlayingRemotely)]) {
+        return ((BOOL (*)(id, SEL))objc_msgSend)(aggregator, @selector(isPlayingRemotely));
+    }
+    if (!connectName.length || sg_routeIsAirPlay || sg_routeIsLocalAccessory) return NO;
+    if ([connectName localizedCaseInsensitiveCompare:@"iphone"] == NSOrderedSame ||
+        [connectName localizedCaseInsensitiveCompare:@"this iphone"] == NSOrderedSame) return NO;
+    if (sg_routePortName.length &&
+        ([connectName localizedCaseInsensitiveCompare:sg_routePortName] == NSOrderedSame ||
+         [connectName rangeOfString:sg_routePortName options:NSCaseInsensitiveSearch].location != NSNotFound ||
+         [sg_routePortName rangeOfString:connectName options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+        return NO;
+    }
+    return YES;
+}
+
+// What Connect's glyph shows: the device Spotify plays on while it is lit and elsewhere, else what the audio plays through.
+static NSString *connectTargetSymbol(NSString *connectName, BOOL lit) {
+    if (lit && isRemoteConnectTarget(connectName)) return connectEntitySymbol(connectName) ?: connectDeviceSymbol(connectName);
+    return sg_routeSymbol ?: kConnectSymbol;
+}
+
+static void applyConnectSymbol(UIImageView *drawn, SGRGlyphView *glyph, BOOL lit, UIColor *ink, BOOL animated, BOOL forceRedraw) {
+    (void)ink;
+    if (!glyph) return;
+    NSString *connectName = objc_getAssociatedObject(drawn, &kConnectNameKey);
+    NSString *target = connectTargetSymbol(connectName, lit);
+    BOOL wasLit = [objc_getAssociatedObject(drawn, &kConnectLitKey) boolValue];
+    if (!forceRedraw && lit == wasLit && [glyph.symbol isEqualToString:target] && glyph.image) return;
+    UIImage *symbol = routeGlyph(target, glyph.preferredSymbolConfiguration);
+    if (!symbol) {
+        target = kConnectSymbol;
+        symbol = routeGlyph(target, glyph.preferredSymbolConfiguration);
+    }
+    if (!symbol) return;
+    BOOL changed = ![glyph.symbol isEqualToString:target];
+    UIImage *before = glyph.image;
+    [glyph setSymbol:target animated:NO];   // the Kit sets a public symbol's image at once and clears the image for any other
+    glyph.tintColor = [UIColor colorWithWhite:1.0 alpha:0.65];
+    if (@available(iOS 17.0, *)) {
+        if (changed && animated && glyph.window && !SGRReduceMotion()) {
+            glyph.image = before;
+            [glyph setSymbolImage:symbol withContentTransition:[NSSymbolReplaceContentTransition transition] options:[NSSymbolEffectOptions optionsWithSpeed:2]];
+            return;
+        }
+    }
+    glyph.image = symbol;
+}
+
+static void reapplyRouteSymbols(BOOL animated) {
+    for (UIImageView *drawn in sg_connectViews.allObjects) {
+        SGRGlyphView *glyph = objc_getAssociatedObject(drawn, &kStandInKey);
+        BOOL lit = [objc_getAssociatedObject(drawn, &kConnectLitKey) boolValue];
+        applyConnectSymbol(drawn, glyph, lit, objc_getAssociatedObject(drawn, &kConnectInkKey), animated, NO);
+    }
+}
+
+// The order Apple's own route buttons ask in (MediaControls' MRUNowPlayingController, outputDevicesSymbolName, in iOS 27.2; the
+// Music app's MPRouteButton keeps the app's AirPlay glyph for the phone's speaker the same way): a split route, Shared Audio,
+// is person.2.fill, the phone's own speaker is airplayaudio, and any other route is named from its output devices by
+// MediaPlayer. A selector this iOS lacks is skipped, which leaves the last step.
+static id appleRouteSymbolName(Class controller, SEL nameFor, id route) {
+    SEL split = NSSelectorFromString(@"isSplitRoute"), speaker = NSSelectorFromString(@"isDeviceSpeakerRoute");
+    if ([route respondsToSelector:split] && ((BOOL (*)(id, SEL))objc_msgSend)(route, split)) return kSharedAudioSymbol;
+    if ([route respondsToSelector:speaker] && ((BOOL (*)(id, SEL))objc_msgSend)(route, speaker)) return kConnectSymbol;
+    return ((id (*)(id, SEL, id))objc_msgSend)(controller, nameFor, route);
+}
+
+// The glyph the system draws for the active route, as the Music app's route button does. MediaPlayer names it from the route's
+// output devices (MediaRemote's MRAVOutputDeviceSymbolProvider) and loads it with _systemImageNamed:, so it may be private.
+// Without the two selectors, or where MediaRemote does not answer, the guess from the port stays.
+static void fetchAppleRouteSymbol(void) {
+    Class controller = NSClassFromString(@"MPAVRoutingController");
+    SEL getRoute = NSSelectorFromString(@"getActiveRouteWithCompletion:"), nameFor = NSSelectorFromString(@"_symbolNameForRoute:");
+    if (![controller respondsToSelector:getRoute] || ![controller respondsToSelector:nameFor]) return;
+    NSUInteger request = ++sg_appleRouteRequest;
+    void (^completion)(id) = ^(id route) {
+        // Called back off the main queue; a reply to a route that has since changed is dropped.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (request != sg_appleRouteRequest) return;
+            id name = route ? appleRouteSymbolName(controller, nameFor, route) : nil;
+            // AirPlay's glyph is what the system answers for a device it does not know, and where the port's guess ends anyway.
+            NSString *symbol = ([name isKindOfClass:NSString.class] && symbolDraws(name) && ![name isEqualToString:kConnectSymbol]) ? name : nil;
+            SGLog(@"redesign player: system route glyph %@, %@", name ?: @"none", symbol ? @"used" : @"not used");
+            if (symbol == sg_appleRouteSymbol || [symbol isEqualToString:sg_appleRouteSymbol]) return;
+            sg_appleRouteSymbol = [symbol copy];
+            refreshRouteSymbol();
+            reapplyRouteSymbols(YES);
+        });
+    };
+    ((void (*)(id, SEL, id))objc_msgSend)(controller, getRoute, completion);
+}
+
+// AVAudioSessionRouteChangeNotification may post from a background thread; queue:nil + dispatch_async
+// to main avoids deadlocking at launch (AGENTS.md). The same goes for MediaPlayer's own route notification.
+static void ensureRouteObserver(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        sg_connectViews = [NSHashTable weakObjectsHashTable];
+        sg_routeUID = [AVAudioSession.sharedInstance.currentRoute.outputs.firstObject.UID copy];
+        refreshRouteSymbol();
+        NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
+        [center addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:nil usingBlock:^(NSNotification *note) {
+            (void)note;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSString *uid = AVAudioSession.sharedInstance.currentRoute.outputs.firstObject.UID;
+                if (uid != sg_routeUID && ![uid isEqualToString:sg_routeUID]) {
+                    sg_routeUID = [uid copy];
+                    sg_appleRouteSymbol = nil;   // the last device's
+                }
+                refreshRouteSymbol();
+                reapplyRouteSymbols(YES);
+                fetchAppleRouteSymbol();
+            });
+        }];
+        [center addObserverForName:@"MPAVRoutingControllerActiveSystemRouteDidChangeNotification" object:nil queue:nil usingBlock:^(NSNotification *note) {
+            (void)note;
+            dispatch_async(dispatch_get_main_queue(), ^{ fetchAppleRouteSymbol(); });
+        }];
+        dispatch_async(dispatch_get_main_queue(), ^{ fetchAppleRouteSymbol(); });
+    });
+}
+
+static UIColor *inkOf(UIImageView *view, UIImage *image) {
+    if (image.isSymbolImage || image.renderingMode == UIImageRenderingModeAlwaysTemplate) return view.tintColor;
+    return SGRPlayerImageInk(image) ?: SGRPrimary();
+}
+
 // Spotify's new Connect glyph: matches the left Lyrics icon in neutral translucent white (rgba(255, 255, 255, 0.65)),
 // and a clear image of the same size in its place, so nothing moves.
-static void takeConnectImage(UIImageView *drawn) {
+static BOOL takeConnectImage(UIImageView *drawn) {
     UIImage *image = drawn.image;
     UIImage *clear = objc_getAssociatedObject(drawn, &kClearKey);
-    if (!image.CGImage || image == clear) return;
+    if (!image.CGImage || image == clear) return NO;
     SGRGlyphView *glyph = objc_getAssociatedObject(drawn, &kStandInKey);
-    UIImage *symbol = [UIImage systemImageNamed:glyph.symbol withConfiguration:glyph.preferredSymbolConfiguration];
-    glyph.image = symbol;
-    glyph.tintColor = [UIColor colorWithWhite:1.0 alpha:0.65];
+    UIColor *ink = inkOf(drawn, image);
+    BOOL lit = SGRPlayerAccentLike(ink);
+    applyConnectSymbol(drawn, glyph, lit, ink, NO, YES);
+    objc_setAssociatedObject(drawn, &kConnectLitKey, @(lit), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(drawn, &kConnectInkKey, ink, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (!clear || !CGSizeEqualToSize(clear.size, image.size) || clear.scale != image.scale) {
         UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
         format.scale = image.scale;
@@ -314,17 +679,31 @@ static void takeConnectImage(UIImageView *drawn) {
         objc_setAssociatedObject(drawn, &kClearKey, clear, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     drawn.image = clear;
+    return YES;
 }
 
 // Spotify draws a new glyph when the device changes, with no layout pass of the footer to tell it, so its setImage:
 // tells the stand-in; the clear image set back in reports too, and stops there. Each pass looks too, at the cost of a
 // compare, for a view the image cannot be watched on.
-static void standInForConnect(UIImageView *drawn) {
+static void standInForConnect(UIImageView *drawn, NSString *connectName) {
     if (SGRPlayerSpotifyIcons()) return;
+    ensureRouteObserver();
     BOOL made = objc_getAssociatedObject(drawn, &kStandInKey) != nil;
-    if (!standIn(drawn, kConnectSymbol)) return;
-    takeConnectImage(drawn);
-    if (!made) SGRObserveImage(drawn, ^(UIImageView *view) { takeConnectImage(view); });
+    NSString *prevName = objc_getAssociatedObject(drawn, &kConnectNameKey);
+    BOOL nameChanged = (connectName != prevName) && ![connectName isEqualToString:prevName];
+    if (nameChanged) objc_setAssociatedObject(drawn, &kConnectNameKey, connectName, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    SGRGlyphView *glyph = standIn(drawn, kConnectSymbol);
+    if (!glyph) return;
+    if (![sg_connectViews containsObject:drawn]) [sg_connectViews addObject:drawn];
+    BOOL handled = takeConnectImage(drawn);
+    if (!made) {
+        applyConnectSymbol(drawn, glyph, [objc_getAssociatedObject(drawn, &kConnectLitKey) boolValue], objc_getAssociatedObject(drawn, &kConnectInkKey), NO, YES);
+        SGRObserveImage(drawn, ^(UIImageView *view) { takeConnectImage(view); });
+    } else if (!handled) {
+        BOOL lit = [objc_getAssociatedObject(drawn, &kConnectLitKey) boolValue];
+        UIColor *ink = objc_getAssociatedObject(drawn, &kConnectInkKey);
+        applyConnectSymbol(drawn, glyph, lit, ink, nameChanged, nameChanged && lit);
+    }
 }
 
 
@@ -388,10 +767,18 @@ UIView *SGRPlayerConnectGlyphIn(UIView *host, UIView *connect) {
         __weak UIView *weakHost = host;
         dispatch_async(dispatch_get_main_queue(), ^{ [weakHost setNeedsLayout]; });
     }
+    __block NSString *connectName = nil;
     SGForEachView(connect, ^(UIView *view) {
-        if ([view isKindOfClass:UILabel.class] || SGClassNamed(view.class, @"MarqueeLabel")) SGRPlayerVanish(view);
+        if ([view isKindOfClass:UILabel.class] || SGClassNamed(view.class, @"MarqueeLabel")) {
+            if (!connectName && [view respondsToSelector:@selector(text)]) {
+                NSString *labelText = ((UILabel *)view).text;
+                if (labelText.length > 0) connectName = labelText;
+            }
+            SGRPlayerVanish(view);
+        }
     });
-    if (glyph) standInForConnect((UIImageView *)glyph);
+    if (!connectName && connect.accessibilityLabel.length > 0) connectName = connect.accessibilityLabel;
+    if (glyph) standInForConnect((UIImageView *)glyph, connectName);
     return glyph;
 }
 
@@ -637,6 +1024,7 @@ static char kGlyphSeenKey;
 %hook _TtC22Connect_AggregatorImpl24ConnectAggregatorService
 - (id)provideConnectAggregatorLegacyAPI {
     id aggregator = %orig;
+    sg_connectAggregator = aggregator;
     SGRPlayerConnectAggregatorProvided(aggregator);
     return aggregator;
 }
