@@ -2684,11 +2684,15 @@ static UIColor *SGRQueueDeleteRedColor(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    // Dark mode (UIUserInterfaceStyleDark, #1A191B surface, and light-on-dark typography/chevron) is
+    // hardcoded here on purpose because Spotify across the board is always dark mode regardless of iOS
+    // system appearance. If Spotify or Vitrine ever gains a light mode, update this preview card to
+    // adapt dynamically and provide a light-mode surface/palette like Apple Music's card does.
     self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
     CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
     CGFloat cardW = MIN(342.0, screenW - 32.0);
 
-    // Solid opaque charcoal (#1A191B) matching Apple Music's preview card without background bleed
+    // Solid opaque charcoal (#1A191B) matching Apple Music's dark preview card without background bleed
     self.view.backgroundColor = [UIColor colorWithRed:(26.0 / 255.0) green:(25.0 / 255.0) blue:(27.0 / 255.0) alpha:1.0];
     self.view.layer.cornerRadius = 22.0;
     self.view.layer.cornerCurve = kCACornerCurveContinuous;
