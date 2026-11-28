@@ -586,6 +586,7 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
 @property (nonatomic, readonly) SGRQueueItem *nowPlayingItem;
 @property (nonatomic, readonly) NSString *contextSubtitle;
 @property (nonatomic, readonly) BOOL isShuffling;
+@property (nonatomic, readonly) NSUInteger metadataRevision;
 
 + (instancetype)shared;
 - (void)ensureResolvedIfNeeded;
@@ -631,6 +632,9 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
     SPTPlayerState *_uncappedState;
     NSString *_lastUncappedFetchKey;
 
+    BOOL _contextEntriesComplete;
+    NSUInteger _metadataRevision;
+    NSSet<NSString *> *_lastAutoplayFutureURIs;
     BOOL _historyClearedByUser;
     BOOL _historySeededFromContext;
     NSString *_initialSeedTrackURI;
@@ -691,6 +695,10 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
 
 - (BOOL)isShuffling {
     return _isShuffling;
+}
+
+- (NSUInteger)metadataRevision {
+    return _metadataRevision;
 }
 
 - (NSString *)contextSubtitle {
@@ -850,9 +858,29 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
     [self notifyObservers];
 }
 
+static void SGRMarkItemDeleted(SGRQueueItem *it, NSMutableSet<NSString *> *deletedKeys) {
+    if (!it || !deletedKeys) return;
+    if (it.uid.length && it.uri.length) {
+        [deletedKeys addObject:[NSString stringWithFormat:@"%@|%@", it.uri, it.uid]];
+        if (it.isUserQueued) {
+            [deletedKeys addObject:[NSString stringWithFormat:@"uq|%@|%@", it.uri, it.uid]];
+        }
+    }
+    if (it.playerTrack) {
+        NSString *ptKey = SGRQueueKeyForPlayerTrack(it.playerTrack, 0);
+        if (ptKey.length) [deletedKeys addObject:ptKey];
+    }
+}
+
 - (void)deleteUserQueuedItemWithKey:(NSString *)key {
     if (!key.length) return;
     [_deletedKeys addObject:key];
+    for (SGRQueueItem *it in _userQueuedItems) {
+        if ([it.key isEqualToString:key]) {
+            SGRMarkItemDeleted(it, _deletedKeys);
+            break;
+        }
+    }
     [_customUserQueueOrderKeys removeObject:key];
     SGRRemoveItemWithKeyFromArray(_userQueuedItems, key);
     SGRRemoveItemWithKeyFromArray(_optimisticUserQueuedItems, key);
@@ -940,13 +968,7 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     [_deletedKeys addObject:key];
     for (SGRQueueItem *it in _continuePlayingItems) {
         if ([it.key isEqualToString:key]) {
-            if (it.uid.length && it.uri.length) {
-                [_deletedKeys addObject:[NSString stringWithFormat:@"%@|%@", it.uri, it.uid]];
-            }
-            if (it.playerTrack) {
-                NSString *ptKey = SGRQueueKeyForPlayerTrack(it.playerTrack, 0);
-                if (ptKey.length) [_deletedKeys addObject:ptKey];
-            }
+            SGRMarkItemDeleted(it, _deletedKeys);
             break;
         }
     }
@@ -1146,31 +1168,30 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     return ctx ?: @"";
 }
 
-- (BOOL)isPlayerTrackAutoplay:(SPTPlayerTrack *)track {
+- (BOOL)isPlayerTrackAutoplay:(SPTPlayerTrack *)track forFuture:(BOOL)isFuture {
     if (!track) return NO;
     if (SGRIsUserQueuedTrack(track)) return NO;
     if (SGRIsAutoplayTrack(track)) return YES;
     NSString *prov = ([track respondsToSelector:@selector(provider)] && [track.provider isKindOfClass:NSString.class]) ? track.provider : nil;
     if ([prov containsString:@"autoplay"] || [prov containsString:@"recommendation"]) return YES;
 
-    // Search context has no context entries: all non-user-queued tracks are search recommendations / autoplay
-    if ([_activeContextURI hasPrefix:@"spotify:search"] || [_activeContextURI containsString:@":search:"]) {
-        return YES;
+    NSString *uri = SGURIString([track respondsToSelector:@selector(URI)] ? track.URI : nil);
+
+    // Search / single-track contexts have no context entries: future tracks are recommendations, while an
+    // incoming NP track is autoplay only if it was already observed in the previous autoplay recommendation lookahead.
+    if ([_activeContextURI hasPrefix:@"spotify:search"] || [_activeContextURI containsString:@":search:"] || [_activeContextURI hasPrefix:@"spotify:track:"]) {
+        if (isFuture) return YES;
+        return (uri.length && [_lastAutoplayFutureURIs containsObject:uri]);
     }
 
-    if ([_activeContextURI hasPrefix:@"spotify:track:"] || [_activeContextURI hasPrefix:@"spotify:station:"] || [_activeContextURI containsString:@":radio:"]) {
-        return YES;
-    }
-
-    // Context-backed (album, playlist, artist, collection):
-    if (_contextEntries.count > 0) {
-        NSString *uri = SGURIString([track respondsToSelector:@selector(URI)] ? track.URI : nil);
+    // Context-backed (album, playlist, artist, collection): only infer tail autoplay when all context entries resolved
+    if (_contextEntriesComplete && _contextEntries.count > 0) {
         NSString *uid = SGRTrackUID(track);
         for (SGRContextTrackEntry *entry in _contextEntries) {
             if (uid.length && [entry.uid isEqualToString:uid]) return NO;
             if (uri.length && [entry.uri isEqualToString:uri]) return NO;
         }
-        return YES; // Not in context entries -> tail autoplay track!
+        return YES; // Not in complete context entries -> tail autoplay track!
     }
 
     return NO;
@@ -1237,8 +1258,10 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     if (contextChanged) {
         _activeContextURI = [ctxURI copy];
         _contextEntries = nil;
+        _contextEntriesComplete = NO;
         _loadingContextURI = nil;
         _resolvedContextTitle = nil;
+        _lastAutoplayFutureURIs = nil;
         _uncappedState = nil;
         _lastUncappedFetchKey = nil;
         [_deletedKeys removeAllObjects];
@@ -1273,7 +1296,7 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     _lastIsPaused = state.isPaused;
 
     SGRQueueItem *incomingNP = [SGRQueueItem itemFromPlayerTrack:np fallbackContextURI:ctxURI occurrence:0];
-    if ([self isPlayerTrackAutoplay:np]) {
+    if ([self isPlayerTrackAutoplay:np forFuture:NO]) {
         incomingNP.isAutoplay = YES;
     }
     [self enrichQueueItem:incomingNP];
@@ -1470,6 +1493,7 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     NSMutableArray<SGRQueueItem *> *liveContextFuture = [NSMutableArray array];
     NSMutableDictionary<NSString *, SPTPlayerTrack *> *liveTrackByUID = [NSMutableDictionary dictionary];
     NSMutableDictionary<NSString *, SPTPlayerTrack *> *liveTrackByURI = [NSMutableDictionary dictionary];
+    NSMutableSet<NSString *> *autoplayFutureURIs = [NSMutableSet set];
 
     NSUInteger occ = 0;
     for (id obj in rawFuture) {
@@ -1477,8 +1501,9 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
         SPTPlayerTrack *t = (SPTPlayerTrack *)obj;
         SGRQueueItem *it = [SGRQueueItem itemFromPlayerTrack:t fallbackContextURI:_activeContextURI occurrence:occ++];
         if (!it) continue;
-        if ([self isPlayerTrackAutoplay:t]) {
+        if ([self isPlayerTrackAutoplay:t forFuture:YES]) {
             it.isAutoplay = YES;
+            if (it.uri.length) [autoplayFutureURIs addObject:it.uri];
         }
         if (!autoplayOn && it.isAutoplay && !it.isUserQueued) continue;
         [self enrichQueueItem:it];
@@ -1561,10 +1586,9 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     }
 
     if (unshuffled.count == 0 && allOtherContextItems.count == 0) {
-        if (autoplayOn) {
-            [unshuffled addObjectsFromArray:liveContextFuture];
-            [allOtherContextItems addObjectsFromArray:liveContextFuture];
-        }
+        // liveContextFuture already filtered out autoplay tracks when !autoplayOn
+        [unshuffled addObjectsFromArray:liveContextFuture];
+        [allOtherContextItems addObjectsFromArray:liveContextFuture];
     } else if (autoplayOn && !_isShuffling && liveContextFuture.count > 0) {
         // Append any autoplay/tail tracks that Spotify's 80-track lookahead resolved after the end of the context
         NSMutableSet<NSString *> *existingKeys = [NSMutableSet setWithCapacity:unshuffled.count];
@@ -1613,12 +1637,15 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
         }
     } else {
         // Optimistic/fallback shuffled mode while core shuffle response is still arriving
-        NSArray<SGRQueueItem *> *pool = unshuffled.count > 0 ? unshuffled : (autoplayOn ? allOtherContextItems : @[]);
+        BOOL repeatingContext = state.options ? state.options.repeatingContext : NO;
+        NSArray<SGRQueueItem *> *pool = unshuffled.count > 0 ? unshuffled : ((autoplayOn || repeatingContext) ? allOtherContextItems : @[]);
         if (pool.count > 0) {
             NSArray<SGRQueueItem *> *seedLive = state.options.shufflingContext ? liveContextFuture : nil;
             [self appendShuffledPool:pool into:finalList resetOrder:shuffleJustTurnedOn seedLive:seedLive];
         }
     }
+
+    _lastAutoplayFutureURIs = autoplayFutureURIs.count > 0 ? [autoplayFutureURIs copy] : nil;
 
     SGRApplyCustomKeyOrder(finalList, _customOrderedKeys);
 
@@ -1829,6 +1856,7 @@ static NSString *SGRNormalizedContextURIForResolve(NSString *contextURI) {
                             }
                             return;
                         }
+                        s->_contextEntriesComplete = (!nextPage.length && pageCount < 8 && collected.count < 500);
                         s->_contextEntries = [collected copy];
                         if (!s->_historyClearedByUser && !s->_historySeededFromContext && !s->_isShuffling &&
                             s->_nowPlayingItem && [s->_nowPlayingItem.uri isEqualToString:s->_initialSeedTrackURI]) {
@@ -1898,6 +1926,7 @@ static NSString *SGRNormalizedContextURIForResolve(NSString *contextURI) {
                     if (!s) return;
                     for (NSString *u in chunk) [s->_inFlightMetadataURIs removeObject:u];
                     if (parsed.count > 0) {
+                        s->_metadataRevision++;
                         [s->_metadataCache addEntriesFromDictionary:parsed];
                         for (SGRQueueItem *h in s->_historyItems) [s enrichQueueItem:h];
                         for (SGRQueueItem *q in s->_userQueuedItems) [s enrichQueueItem:q];
@@ -2182,6 +2211,7 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     _highlightBand.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.08];
     _highlightBand.alpha = 0.0;
     _highlightBand.userInteractionEnabled = NO;
+    _highlightBand.accessibilityElementsHidden = YES;
     [self addSubview:_highlightBand];
 
     _deleteCapsuleView = [[UIView alloc] initWithFrame:CGRectZero];
@@ -2197,12 +2227,14 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     _deleteCapsuleRim = [[UIView alloc] initWithFrame:CGRectZero];
     _deleteCapsuleRim.backgroundColor = [UIColor colorWithRed:175.0/255.0 green:24.0/255.0 blue:44.0/255.0 alpha:0.45];
     _deleteCapsuleRim.userInteractionEnabled = NO;
+    _deleteCapsuleRim.accessibilityElementsHidden = YES;
     [_deleteCapsuleView addSubview:_deleteCapsuleRim];
 
     _minusDiscView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 19.0, 19.0)];
     _minusDiscView.backgroundColor = UIColor.whiteColor;
     _minusDiscView.layer.cornerRadius = 9.5;
     _minusDiscView.userInteractionEnabled = NO;
+    _minusDiscView.accessibilityElementsHidden = YES;
     [_deleteCapsuleView addSubview:_minusDiscView];
 
     _minusBarView = [[UIView alloc] initWithFrame:CGRectMake(4.75, 8.4, 9.5, 2.2)];
@@ -2684,11 +2716,16 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     CGFloat _pendingScrollOffset;
     BOOL _hasPendingScrollOffset;
 
+    // Cached Pill Slots & Prompt Generation
+    NSArray<NSNumber *> *_cachedActivePillSlots;
+    NSUInteger _clearPromptGeneration;
+
     // Drag-to-Reorder & Row Delete State
     SGRQueueRowView *_draggingRow;
     UIView *_dragSnapshotView;
     NSInteger _dragCurrentIndex;
     CGFloat _dragGrabOffsetY;
+    BOOL _isSettlingDrag;
     NSInteger _activeDeleteAnimations;
     BOOL _landscapeMode;
 }
@@ -2728,6 +2765,7 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     _queueRowViews = [NSMutableArray array];
     _queueRowsByKey = [NSMutableDictionary dictionary];
 
+    [self refreshActivePillSlotsCache];
     [self buildViewHierarchy];
     SGAddPlayerStateObserver(self);
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(handleNowPlayingArtworkChanged:) name:SGRNowPlayingArtworkDidChangeNotification object:nil];
@@ -2803,7 +2841,18 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     _pillRefreshTimer = nil;
 }
 
+- (void)refreshActivePillSlotsCache {
+    NSMutableArray<NSNumber *> *slots = [NSMutableArray arrayWithCapacity:4];
+    for (NSUInteger i = 0; i < 4; i++) {
+        if (SGRQueuePillKindForSlot(i) != SGRQueuePillNone) {
+            [slots addObject:@(i)];
+        }
+    }
+    _cachedActivePillSlots = [slots copy];
+}
+
 - (void)handlePillsChanged:(__unused NSNotification *)note {
+    [self refreshActivePillSlotsCache];
     _lastPillRenderSize = CGSizeZero;
     _lastSleepMenuKey = nil;
     [self setNeedsLayout];
@@ -2829,6 +2878,7 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     _grabberPill.layer.cornerRadius = kGrabberHeight * 0.5;
     _grabberPill.layer.compositingFilter = @"plusL";
     _grabberPill.userInteractionEnabled = NO;
+    _grabberPill.accessibilityElementsHidden = YES;
     [self addSubview:_grabberPill];
 
     // 2. Scrollable Queue Viewport (starts at y=17 -> screenY=72..538 pt, height=466 pt)
@@ -2840,6 +2890,13 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     _bottomFadeMask = [CAGradientLayer layer];
     _bottomFadeMask.startPoint = CGPointMake(0.5, 0.0);
     _bottomFadeMask.endPoint = CGPointMake(0.5, 1.0);
+    _bottomFadeMask.colors = @[
+        (id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor,
+        (id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor,
+        (id)[UIColor colorWithWhite:1.0 alpha:0.67].CGColor,
+        (id)[UIColor colorWithWhite:1.0 alpha:0.35].CGColor,
+        (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor
+    ];
     _viewportClipView.layer.mask = _bottomFadeMask;
 
     _scrollView = [[UIScrollView alloc] initWithFrame:CGRectZero];
@@ -2950,6 +3007,7 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     _addSongsPlusBox.layer.cornerRadius = 7.0;
     _addSongsPlusBox.layer.cornerCurve = kCACornerCurveContinuous;
     _addSongsPlusBox.userInteractionEnabled = NO;
+    _addSongsPlusBox.accessibilityElementsHidden = YES;
     [_addSongsRowControl addSubview:_addSongsPlusBox];
 
     UIImageSymbolConfiguration *plusCfg = [UIImageSymbolConfiguration configurationWithPointSize:20.0 weight:UIImageSymbolWeightSemibold];
@@ -2957,6 +3015,8 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     _addSongsPlusIcon = [[UIImageView alloc] initWithImage:plusImg];
     _addSongsPlusIcon.contentMode = UIViewContentModeCenter;
     _addSongsPlusIcon.frame = _addSongsPlusBox.frame;
+    _addSongsPlusIcon.userInteractionEnabled = NO;
+    _addSongsPlusIcon.accessibilityElementsHidden = YES;
     [_addSongsRowControl addSubview:_addSongsPlusIcon];
 
     _addSongsLabel = [[UILabel alloc] initWithFrame:CGRectZero];
@@ -3090,6 +3150,7 @@ static UIColor *SGRQueueDeleteRedColor(void) {
 #pragma mark - Open / Close Transition Helpers
 
 - (void)prepareForOpenTransition {
+    [self closeParkedSwipeRowsExcept:nil animated:NO];
     SGRQueueSession *session = [SGRQueueSession shared];
     [session ensureResolvedIfNeeded];
     if (session.nowPlayingItem.uri.length) {
@@ -3240,12 +3301,33 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     [self syncFromSessionAnimatedReorder:NO forceRebuild:NO];
 }
 
+- (NSString *)fingerprintForSession:(SGRQueueSession *)session {
+    SGRQueueItem *np = session.nowPlayingItem;
+    NSArray<SGRQueueItem *> *hist = session.historyItems;
+    NSArray<SGRQueueItem *> *uq   = session.userQueuedItems;
+    NSArray<SGRQueueItem *> *next = session.continuePlayingItems;
+
+    NSMutableString *fp = [NSMutableString stringWithFormat:@"NP:%@|%@|M:%lu|H:%lu|Q:%lu|N:%lu|S:%d|",
+                           np.uri ?: @"", np.title ?: @"", (unsigned long)session.metadataRevision,
+                           (unsigned long)hist.count, (unsigned long)uq.count, (unsigned long)next.count, session.isShuffling ? 1 : 0];
+    for (NSUInteger i = 0; i < MIN((NSUInteger)40, uq.count); i++) {
+        [fp appendFormat:@"Q%@:%@,", uq[i].key, uq[i].title ?: @""];
+    }
+    for (NSUInteger i = 0; i < MIN((NSUInteger)40, next.count); i++) {
+        [fp appendFormat:@"%@:%@,", next[i].key, next[i].title ?: @""];
+    }
+    for (NSUInteger i = 0; i < MIN((NSUInteger)15, hist.count); i++) {
+        [fp appendFormat:@"H%@:%@,", hist[i].key, hist[i].title ?: @""];
+    }
+    return [fp copy];
+}
+
 - (void)syncFromSessionAnimatedReorder:(BOOL)animateReorder forceRebuild:(BOOL)forceRebuild {
     SGRQueueSession *session = [SGRQueueSession shared];
     SPTPlayerState *state = SGPlayerState();
     [self updatePlaybackPillsWithState:state];
 
-    if (!forceRebuild && (_draggingRow || _activeDeleteAnimations > 0)) return;
+    if (!forceRebuild && (_draggingRow || _isSettlingDrag || _activeDeleteAnimations > 0)) return;
     for (SGRQueueRowView *row in _userQueueRowViews) {
         if (!forceRebuild && row.isSwipeParked) return;
     }
@@ -3258,23 +3340,12 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     NSArray<SGRQueueItem *> *uq   = session.userQueuedItems;
     NSArray<SGRQueueItem *> *next = session.continuePlayingItems;
 
-    NSMutableString *fp = [NSMutableString stringWithFormat:@"NP:%@|%@|H:%lu|Q:%lu|N:%lu|S:%d|",
-                           np.uri ?: @"", np.title ?: @"", (unsigned long)hist.count, (unsigned long)uq.count, (unsigned long)next.count, session.isShuffling ? 1 : 0];
-    for (NSUInteger i = 0; i < MIN((NSUInteger)20, uq.count); i++) {
-        [fp appendFormat:@"Q%@:%@,", uq[i].key, uq[i].title ?: @""];
-    }
-    for (NSUInteger i = 0; i < MIN((NSUInteger)20, next.count); i++) {
-        [fp appendFormat:@"%@:%@,", next[i].key, next[i].title ?: @""];
-    }
-    for (NSUInteger i = 0; i < MIN((NSUInteger)10, hist.count); i++) {
-        [fp appendFormat:@"H%@:%@,", hist[i].key, hist[i].title ?: @""];
-    }
-
+    NSString *fp = [self fingerprintForSession:session];
     if (!forceRebuild && [_lastStateFingerprint isEqualToString:fp]) {
         [self updateNowPlayingCardWithItem:np subtitle:session.contextSubtitle];
         return;
     }
-    _lastStateFingerprint = [fp copy];
+    _lastStateFingerprint = fp;
     _lastRenderedShuffling = session.isShuffling;
 
     _currentItem = np;
@@ -3359,10 +3430,13 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
             _loadedNPArtURL = [u copy];
         } else if (![u isEqualToString:_loadedNPArtURL]) {
             _loadedNPArtURL = [u copy];
+            NSString *expectedURL = _loadedNPArtURL;
             __weak typeof(self) weakSelf = self;
             SGRLoadQueueArtwork(item.artworkURL, ^(UIImage *image) {
                 __strong typeof(weakSelf) strongSelf = weakSelf;
-                if (strongSelf && image) strongSelf->_npArtView.image = image;
+                if (strongSelf && image && [strongSelf->_loadedNPArtURL isEqualToString:expectedURL]) {
+                    strongSelf->_npArtView.image = image;
+                }
             });
         }
     }
@@ -3553,13 +3627,6 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
     CGFloat locRow5Top = MAX(0.0, MIN(1.0, (viewportH - 48.0) / viewportH));
     CGFloat locRow5Mid = MAX(0.0, MIN(1.0, (viewportH - 24.0) / viewportH));
     _bottomFadeMask.locations = @[@0.0, @(locStart), @(locRow5Top), @(locRow5Mid), @1.0];
-    _bottomFadeMask.colors = @[
-        (id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor,
-        (id)[UIColor colorWithWhite:1.0 alpha:1.0].CGColor,
-        (id)[UIColor colorWithWhite:1.0 alpha:0.67].CGColor,
-        (id)[UIColor colorWithWhite:1.0 alpha:0.35].CGColor,
-        (id)[UIColor colorWithWhite:1.0 alpha:0.0].CGColor
-    ];
     [CATransaction commit];
 
     CGFloat targetScrollOffset = _hasPendingScrollOffset ? _pendingScrollOffset : [self currentScrollOffset];
@@ -3573,8 +3640,8 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
     _npArtView.frame = CGRectMake(kSideMargin, 0.0, 72.0, 72.0);
     _npDetailsView.bounds = CGRectMake(0.0, 0.0, w, 72.0);
     _npDetailsView.center = CGPointMake(w * 0.5, 36.0);
-    CGFloat moreW = 28.0;
-    CGFloat starW = 28.0;
+    CGFloat moreW = 44.0;
+    CGFloat starW = 44.0;
     CGFloat moreCenterX = _landscapeMode ? (w - kSideMargin - 17.0) : round(w * (341.5 / 390.0));
     CGFloat starCenterX = _landscapeMode ? (w - kSideMargin - 64.67) : round(w * (295.0 / 390.0));
     CGFloat npBtnCenterY = _landscapeMode ? 22.83 : 36.0;
@@ -3630,9 +3697,9 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
         [self placeEmptyQueuePromptForWidth:w];
     }
 
-    // Section 2A ("Queue" + "Clear") header subviews:
+    // Section 2A ("Queue" + "Clear") header subviews (44pt hit height centered on text baseline):
     _userQueueTitleLabel.frame = CGRectMake(kSideMargin, 3.0, 140.0, 22.0);
-    _userQueueClearButton.frame = CGRectMake(w - kSideMargin - 52.0, -1.33, 52.0, 30.0);
+    _userQueueClearButton.frame = CGRectMake(w - kSideMargin - 56.0, -8.33, 56.0, 44.0);
     _userQueueClearButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentRight;
 
     // Section 2B ("Continue Playing" + "From ...") header subviews:
@@ -3641,7 +3708,7 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
 
     // Section 0 Header subviews: "History" + "Clear" matching "Queue" + "Clear" (x = 32 .. w - 32)
     _historyTitleLabel.frame = CGRectMake(kSideMargin, 3.0, 140.0, 22.0);
-    _historyClearButton.frame = CGRectMake(w - kSideMargin - 52.0, -1.33, 52.0, 30.0);
+    _historyClearButton.frame = CGRectMake(w - kSideMargin - 56.0, -8.33, 56.0, 44.0);
 
     [self layoutRowViews:_historyRowViews pitch:kHistoryRowPitch width:w skipDragging:NO];
     [self layoutRowViews:_userQueueRowViews pitch:kQueueRowPitch width:w skipDragging:YES];
@@ -3723,13 +3790,8 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
 }
 
 - (NSArray<NSNumber *> *)activePillSlots {
-    NSMutableArray<NSNumber *> *slots = [NSMutableArray arrayWithCapacity:4];
-    for (NSUInteger i = 0; i < 4; i++) {
-        if (SGRQueuePillKindForSlot(i) != SGRQueuePillNone) {
-            [slots addObject:@(i)];
-        }
-    }
-    return slots;
+    if (!_cachedActivePillSlots) [self refreshActivePillSlotsCache];
+    return _cachedActivePillSlots;
 }
 
 - (void)closeParkedSwipeRowsExcept:(SGRQueueRowView *)excludedRow animated:(BOOL)animated {
@@ -4076,6 +4138,7 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
 }
 
 - (void)handlePillTap:(UIButton *)pill {
+    [self closeParkedSwipeRowsExcept:nil animated:YES];
     NSUInteger slot = (NSUInteger)pill.tag;
     SGRQueuePillKind kind = SGRQueuePillKindForSlot(slot);
     switch (kind) {
@@ -4183,6 +4246,7 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
 }
 
 - (void)handleAddSongsToQueueTap {
+    [self closeParkedSwipeRowsExcept:nil animated:YES];
     UIImpactFeedbackGenerator *gen = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
     [gen impactOccurred];
     SGRPlayerMinimizeIfOpen();
@@ -4215,6 +4279,9 @@ static UIColor *SGRQueueClearCoralColor(void) {
     ctrl.layer.cornerCurve = kCACornerCurveContinuous;
     ctrl.clipsToBounds = YES;
     ctrl.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    ctrl.isAccessibilityElement = YES;
+    ctrl.accessibilityLabel = title;
+    ctrl.accessibilityTraits = UIAccessibilityTraitButton;
     [ctrl addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
     [ctrl addTarget:self action:@selector(handlePromptCapsuleTouchDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
     [ctrl addTarget:self action:@selector(handlePromptCapsuleTouchUp:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
@@ -4299,6 +4366,7 @@ static UIColor *SGRQueueClearCoralColor(void) {
         // In Apple Music @ 390x844, card spans screenY = 354.00 .. 502.33 pt (height 148.33 pt)
         CGPoint originInHost = [self convertPoint:CGPointMake(0.0, 300.0) toView:hostView];
         cardY = round(originInHost.y * 3.0) / 3.0;
+        cardY = MAX(16.0, MIN(hostBounds.size.height - cardH - 16.0, cardY));
     }
     CGRect cardRect = CGRectMake(cardX, cardY, cardW, cardH);
 
@@ -4421,6 +4489,7 @@ static UIColor *SGRQueueClearCoralColor(void) {
     }];
 
     NSString *confirmTitle = isHistory ? @"Clear" : @"Clear Queue";
+    _clearPromptConfirmControl.accessibilityLabel = confirmTitle;
     _clearPromptConfirmLabel.attributedText = [[NSAttributedString alloc] initWithString:confirmTitle attributes:@{
         NSFontAttributeName: SGRQueueFont(17.0, UIFontWeightSemibold),
         NSForegroundColorAttributeName: SGRQueueClearCoralColor(),
@@ -4429,12 +4498,14 @@ static UIColor *SGRQueueClearCoralColor(void) {
     [self resetPromptCapsuleControl:_clearPromptCancelControl];
     [self resetPromptCapsuleControl:_clearPromptConfirmControl];
 
+    _clearPromptGeneration++;
     if (_clearPromptOverlay.superview != hostView) {
         [_clearPromptOverlay removeFromSuperview];
         [hostView addSubview:_clearPromptOverlay];
     }
     _clearPromptCard.transform = CGAffineTransformIdentity;
     [self layoutClearPromptOverlay];
+    _clearPromptOverlay.userInteractionEnabled = YES;
     _clearPromptOverlay.hidden = NO;
     _clearPromptOverlay.alpha = 0.0;
     // Matches Apple Music's exact 1.09x -> 1.00x alert entrance scale
@@ -4463,13 +4534,17 @@ static UIColor *SGRQueueClearCoralColor(void) {
         if (completion) completion();
         return;
     }
+    _clearPromptOverlay.userInteractionEnabled = NO;
+    NSUInteger gen = ++_clearPromptGeneration;
     // Matches Apple Music's exact 1.00x pure fade-out dismissal over 0.20s (no scale shrinking)
     [UIView animateWithDuration:0.20 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState animations:^{
         self->_clearPromptOverlay.alpha = 0.0;
     } completion:^(__unused BOOL finished) {
-        self->_clearPromptOverlay.hidden = YES;
-        self->_clearPromptCard.transform = CGAffineTransformIdentity;
-        [self->_clearPromptOverlay removeFromSuperview];
+        if (self->_clearPromptGeneration == gen) {
+            self->_clearPromptOverlay.hidden = YES;
+            self->_clearPromptCard.transform = CGAffineTransformIdentity;
+            [self->_clearPromptOverlay removeFromSuperview];
+        }
         if (completion) completion();
     }];
 }
@@ -4774,6 +4849,7 @@ static void SGRPlayerSkipToNextTrack(id<SPTPlayer> player) {
 
     switch (pan.state) {
         case UIGestureRecognizerStateBegan: {
+            if (_draggingRow || _isSettlingDrag) return;
             [self closeParkedSwipeRowsExcept:nil animated:NO];
             NSUInteger foundIdx = [rowViews indexOfObject:row];
             if (foundIdx == NSNotFound) return;
@@ -4849,6 +4925,8 @@ static void SGRPlayerSkipToNextTrack(id<SPTPlayer> player) {
             CGRect finalFrame = CGRectMake(0.0, _dragCurrentIndex * kQueueRowPitch, w, kQueueRowPitch);
             _draggingRow = nil;
             _dragSnapshotView = nil;
+            _isSettlingDrag = YES;
+            __weak typeof(self) weakSelf = self;
 
             [UIView animateWithDuration:0.22 delay:0 options:UIViewAnimationOptionCurveEaseOut animations:^{
                 snap.transform = CGAffineTransformIdentity;
@@ -4857,8 +4935,13 @@ static void SGRPlayerSkipToNextTrack(id<SPTPlayer> player) {
             } completion:^(__unused BOOL finished) {
                 finishedRow.alpha = 1.0;
                 [snap removeFromSuperview];
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (strongSelf) {
+                    strongSelf->_isSettlingDrag = NO;
+                    strongSelf->_lastStateFingerprint = [strongSelf fingerprintForSession:[SGRQueueSession shared]];
+                }
+                [[SGRQueueSession shared] commitContinuePlayingReorder];
             }];
-            [[SGRQueueSession shared] commitContinuePlayingReorder];
             break;
         }
         default:
@@ -4949,12 +5032,13 @@ static void SGRPlayerSkipToNextTrack(id<SPTPlayer> player) {
     } else {
         [[SGRQueueSession shared] moveContinuePlayingItemFromIndex:idx toIndex:0];
     }
-    [[SGRQueueSession shared] commitContinuePlayingReorder];
     SGRQueueItem *t = itemsList[idx];
     [itemsList removeObjectAtIndex:idx];
     [itemsList insertObject:t atIndex:0];
     [rowViews removeObjectAtIndex:idx];
     [rowViews insertObject:row atIndex:0];
+    _lastStateFingerprint = [self fingerprintForSession:[SGRQueueSession shared]];
+    [[SGRQueueSession shared] commitContinuePlayingReorder];
     [UIView animateWithDuration:0.30 delay:0 usingSpringWithDamping:0.82 initialSpringVelocity:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
         for (NSUInteger i = 0; i < rowViews.count; i++) {
             rowViews[i].rowIndex = (NSInteger)i;

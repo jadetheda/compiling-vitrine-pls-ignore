@@ -654,10 +654,10 @@ static void watchSlider(UIView *host) {
 %hook _TtCO17NowPlaying_ECMKit11ProgressBar6Slider
 - (void)layoutSubviews {
     %orig;
-    if (SGRPlayerQueueOpen()) {
+    UISlider *slider = (UISlider *)self;
+    if ((slider == sg_seekSlider || (sg_durationHost && [slider isDescendantOfView:sg_durationHost])) && SGRPlayerQueueOpen()) {
         CGFloat targetScale = 326.0 / 340.0;
         CGAffineTransform scaleT = CGAffineTransformMakeScale(targetScale, 1.0);
-        UISlider *slider = (UISlider *)self;
         if (!CGAffineTransformEqualToTransform(slider.transform, scaleT)) slider.transform = scaleT;
     }
 }
@@ -706,11 +706,13 @@ static void updateDurationForQueue(void) {
 
     if (taken) {
         taken.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+        SGRMonospacedDigits(taken);
         taken.textColor = [UIColor colorWithWhite:1.0 alpha:0.48];
         taken.layer.compositingFilter = @"plusL";
     }
     if (remaining) {
         remaining.font = [UIFont systemFontOfSize:12.0 weight:UIFontWeightSemibold];
+        SGRMonospacedDigits(remaining);
         remaining.textColor = [UIColor colorWithWhite:1.0 alpha:0.48];
         remaining.layer.compositingFilter = @"plusL";
         if ([remaining.text containsString:@"-"] && ![remaining.text containsString:@"\u2212"]) {
