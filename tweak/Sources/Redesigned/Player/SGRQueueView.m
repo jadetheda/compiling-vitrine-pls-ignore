@@ -3060,7 +3060,10 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     UIButton *pill = [UIButton buttonWithType:UIButtonTypeCustom];
     pill.tag = (NSInteger)slot;
     pill.backgroundColor = UIColor.clearColor;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
     pill.adjustsImageWhenHighlighted = NO;
+#pragma clang diagnostic pop
     pill.layer.cornerRadius = 19.0;
     pill.layer.cornerCurve = kCACornerCurveContinuous;
     pill.clipsToBounds = YES;
