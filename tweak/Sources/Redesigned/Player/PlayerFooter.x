@@ -182,18 +182,20 @@ static UIImage *SGRQueueActiveKnockoutIconImage(CGSize size) {
         [[UIColor colorWithWhite:1.0 alpha:0.65] setFill];
         [circle fill];
 
-        // Knockout SF Symbol list.bullet using kCGBlendModeDestinationOut + template alpha mask
-        // (kCGBlendModeClear in Quartz clears the entire rectangular bounding box instead of masking by alpha)
+        // Knockout SF Symbol list.bullet via transparency layer so UIImage's internal draw doesn't override DestinationOut with Normal.
         UIImageSymbolConfiguration *cfg = [UIImageSymbolConfiguration configurationWithPointSize:19.8 weight:UIImageSymbolWeightMedium];
-        UIImage *sym = [[UIImage systemImageNamed:kQueueSymbol withConfiguration:cfg] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        UIImage *sym = [[UIImage systemImageNamed:kQueueSymbol withConfiguration:cfg] imageWithTintColor:UIColor.whiteColor renderingMode:UIImageRenderingModeAlwaysOriginal];
         if (sym) {
             CGRect symRect = CGRectMake((size.width - sym.size.width) * 0.5,
                                         (size.height - sym.size.height) * 0.5,
                                         sym.size.width,
                                         sym.size.height);
+            CGContextSaveGState(cg);
             CGContextSetBlendMode(cg, kCGBlendModeDestinationOut);
-            [[UIColor colorWithWhite:0.0 alpha:1.0] setFill];
-            [sym drawInRect:symRect];
+            CGContextBeginTransparencyLayer(cg, NULL);
+            [sym drawInRect:symRect blendMode:kCGBlendModeNormal alpha:1.0];
+            CGContextEndTransparencyLayer(cg);
+            CGContextRestoreGState(cg);
         }
     }];
     cached = [img imageWithRenderingMode:UIImageRenderingModeAlwaysOriginal];
@@ -225,10 +227,16 @@ void SGRPlayerQueueChanged(void) {
     SGRGlyphButton *glyph = sg_queueGlyph;
     if (!glyph) return;
     BOOL open = SGRPlayerQueueOpen();
+    SPTEncoreIconView *encore = objc_getAssociatedObject(glyph, &kEncoreKey);
     NSNumber *wasOpen = objc_getAssociatedObject(glyph, &kQueueWasOpenKey);
-    if (wasOpen && wasOpen.boolValue == open) return;
+    if (wasOpen && wasOpen.boolValue == open) {
+        if (encore) {
+            encore.hidden = open;
+            glyph.glyph.hidden = !open;
+        }
+        return;
+    }
     objc_setAssociatedObject(glyph, &kQueueWasOpenKey, @(open), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-
     BOOL animated = glyph.window && !SGRPlayerIsTransitioning();
     void (^mark)(void) = ^{
         glyph.opaque = NO;
@@ -236,11 +244,20 @@ void SGRPlayerQueueChanged(void) {
         glyph.glyph.opaque = NO;
         glyph.glyph.layer.opaque = NO;
         if (open) {
+            if (encore) encore.hidden = YES;
+            glyph.glyph.hidden = NO;
             glyph.glyph.image = SGRQueueActiveKnockoutIconImage(CGSizeMake(38.0, 38.0));
             glyph.glyph.tintColor = nil;
             glyph.backgroundColor = UIColor.clearColor;
             glyph.layer.compositingFilter = nil;
+        } else if (encore) {
+            encore.hidden = NO;
+            encore.foregroundColor = [UIColor colorWithWhite:1.0 alpha:0.65];
+            glyph.glyph.hidden = YES;
+            glyph.backgroundColor = UIColor.clearColor;
+            glyph.layer.compositingFilter = nil;
         } else {
+            glyph.glyph.hidden = NO;
             glyph.glyph.image = [UIImage systemImageNamed:kQueueSymbol withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:kLyricsGlyphSize weight:UIImageSymbolWeightRegular]];
             glyph.glyph.tintColor = [UIColor colorWithWhite:1.0 alpha:0.65];
             glyph.backgroundColor = UIColor.clearColor;
