@@ -207,6 +207,36 @@ static void applyCredit(UIView *cell, UIView *row, UIView *page) {
 
 #pragma mark - the rows
 
+
+static NSString *sgr_focusTrackURI;
+static NSString *sgr_focusTrackTitle;
+static CFTimeInterval sgr_focusSetTimestamp;
+
+void SGRSetAlbumTrackToFocus(NSString *uri, NSString *title) {
+    sgr_focusTrackURI = [uri copy];
+    sgr_focusTrackTitle = [title copy];
+    sgr_focusSetTimestamp = CACurrentMediaTime();
+}
+
+NSString *SGRFocusTrackTitle(void) {
+    if (sgr_focusTrackTitle.length && CACurrentMediaTime() - sgr_focusSetTimestamp < 12.0) {
+        return sgr_focusTrackTitle;
+    }
+    return nil;
+}
+
+NSString *SGRFocusTrackURI(void) {
+    if (sgr_focusTrackURI.length && CACurrentMediaTime() - sgr_focusSetTimestamp < 12.0) {
+        return sgr_focusTrackURI;
+    }
+    return nil;
+}
+
+void SGRClearAlbumTrackFocus(void) {
+    sgr_focusTrackTitle = nil;
+    sgr_focusTrackURI = nil;
+}
+
 static void applyRow(UIView *cell, UIView *page) {
     clearSurface(cell);
     UIView *row = SGRFindByIdentifier(cell, @"Components.UI.RetrievalRow*", &kRowKey);
@@ -226,6 +256,46 @@ static void applyRow(UIView *cell, UIView *page) {
 
     applyHairline(row);
     if (hidesCredits()) applyCredit(cell, row, page);
+
+    NSString *focus = SGRFocusTrackTitle();
+    if (focus.length) {
+        UIView *titleWrap = SGRFindByIdentifier(row, @"EncoreConsumerMobile.View.Granular.Title", &kTitleKey);
+        UILabel *tLabel = onlyLabel(titleWrap);
+        if (tLabel.text.length && ([tLabel.text isEqualToString:focus] ||
+                                   [tLabel.text hasPrefix:focus] ||
+                                   [focus hasPrefix:tLabel.text])) {
+            SGRClearAlbumTrackFocus();
+            UIScrollView *scroller = nil;
+            for (UIView *p = cell.superview; p; p = p.superview) {
+                if ([p isKindOfClass:UIScrollView.class]) {
+                    scroller = (UIScrollView *)p;
+                    break;
+                }
+            }
+            if (scroller) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    CGRect rectInScroll = [scroller convertRect:cell.bounds fromView:cell];
+                    CGFloat targetY = CGRectGetMidY(rectInScroll) - scroller.bounds.size.height * 0.45;
+                    CGFloat maxY = scroller.contentSize.height - scroller.bounds.size.height;
+                    if (maxY > 0) {
+                        targetY = MAX(0.0, MIN(maxY, targetY));
+                        [scroller setContentOffset:CGPointMake(0, targetY) animated:YES];
+                    }
+                    UIView *pulse = [[UIView alloc] initWithFrame:cell.bounds];
+                    pulse.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.18];
+                    pulse.userInteractionEnabled = NO;
+                    pulse.layer.cornerRadius = 8.0;
+                    pulse.layer.cornerCurve = kCACornerCurveContinuous;
+                    [cell addSubview:pulse];
+                    [UIView animateWithDuration:0.85 delay:0.20 options:UIViewAnimationOptionCurveEaseOut animations:^{
+                        pulse.alpha = 0.0;
+                    } completion:^(__unused BOOL finished) {
+                        [pulse removeFromSuperview];
+                    }];
+                });
+            }
+        }
+    }
 }
 
 #pragma mark - the cells

@@ -63,3 +63,9 @@ void SGRAlbumSetSpotifyColor(UIView *view, UIColor *color);
 // The page comes in whole once its cover has been read (Kit/SGRField.h). Called from the album header's pass
 // only, so a podcast's episode page, the same template with no cover for the field to read, is never held.
 void SGRAlbumHoldPage(UIView *page);
+
+// Focus target track from queue preview card
+void SGRSetAlbumTrackToFocus(NSString *uri, NSString *title);
+NSString *SGRFocusTrackTitle(void);
+NSString *SGRFocusTrackURI(void);
+void SGRClearAlbumTrackFocus(void);
