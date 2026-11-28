@@ -771,7 +771,7 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
             desc = _nowPlayingItem.artist ?: @"";
         } else if ([ctxURI hasPrefix:@"spotify:station:"] || [ctxURI containsString:@":radio:"]) {
             desc = _nowPlayingItem.title.length ? [NSString stringWithFormat:@"%@ Radio", _nowPlayingItem.title] : @"Radio";
-        } else if ([ctxURI hasPrefix:@"spotify:search"]) {
+        } else if ([ctxURI hasPrefix:@"spotify:search"] || [ctxURI containsString:@":search"]) {
             desc = @"Search";
         }
     }
@@ -1186,13 +1186,23 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     }
 }
 
+static BOOL SGRIsNonContextURI(NSString *ctxURI) {
+    if (!ctxURI.length) return YES;
+    NSString *lower = ctxURI.lowercaseString;
+    if ([lower hasPrefix:@"spotify:search"] || [lower containsString:@":search"]) return YES;
+    if ([lower hasPrefix:@"spotify:find"] || [lower containsString:@":find:"]) return YES;
+    if ([lower hasPrefix:@"spotify:track:"]) return YES;
+    if ([lower hasPrefix:@"spotify:internal:"]) return YES;
+    if ([lower hasPrefix:@"spotify:assist:"]) return YES;
+    return NO;
+}
+
 - (NSString *)effectiveContextURIForState:(SPTPlayerState *)state {
     NSString *ctx = SGURIString([state respondsToSelector:@selector(contextURI)] ? state.contextURI : nil);
     SPTPlayerTrack *np = state.track;
     NSDictionary *meta = ([np respondsToSelector:@selector(metadata)] && [np.metadata isKindOfClass:NSDictionary.class]) ? np.metadata : nil;
-    if (!ctx.length && [meta[@"context_uri"] isKindOfClass:NSString.class]) ctx = meta[@"context_uri"];
-    if ((!ctx.length || [ctx hasPrefix:@"spotify:track:"]) && [meta[@"album_uri"] isKindOfClass:NSString.class]) {
-        ctx = meta[@"album_uri"];
+    if (!ctx.length && [meta[@"context_uri"] isKindOfClass:NSString.class]) {
+        ctx = meta[@"context_uri"];
     }
     return ctx ?: @"";
 }
@@ -1202,13 +1212,15 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     if (SGRIsUserQueuedTrack(track)) return NO;
     if (SGRIsAutoplayTrack(track)) return YES;
     NSString *prov = ([track respondsToSelector:@selector(provider)] && [track.provider isKindOfClass:NSString.class]) ? track.provider : nil;
-    if ([prov containsString:@"autoplay"] || [prov containsString:@"recommendation"]) return YES;
+    if ([prov containsString:@"autoplay"] || [prov containsString:@"recommendation"] || [prov containsString:@"search"]) return YES;
 
     NSString *uri = SGURIString([track respondsToSelector:@selector(URI)] ? track.URI : nil);
+    NSDictionary *meta = ([track respondsToSelector:@selector(metadata)] && [track.metadata isKindOfClass:NSDictionary.class]) ? track.metadata : nil;
+    NSString *trackCtx = [meta[@"context_uri"] isKindOfClass:NSString.class] ? meta[@"context_uri"] : @"";
 
-    // Search / single-track contexts have no context entries: future tracks are recommendations, while an
-    // incoming NP track is autoplay only if it was already observed in the previous autoplay recommendation lookahead.
-    if ([_activeContextURI hasPrefix:@"spotify:search"] || [_activeContextURI containsString:@":search:"] || [_activeContextURI hasPrefix:@"spotify:track:"]) {
+    // Search / empty / single-track contexts have no natural context queue: every non-user-queued future track
+    // is a recommendation/autoplay item, while an incoming NP track is autoplay if previously seen in lookahead.
+    if (SGRIsNonContextURI(_activeContextURI) || (trackCtx.length && SGRIsNonContextURI(trackCtx))) {
         if (isFuture) return YES;
         return (uri.length && [_lastAutoplayFutureURIs containsObject:uri]);
     }
@@ -1283,7 +1295,8 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     [self harvestMetadataFromTracks:rawFuture];
 
     NSString *ctxURI = [self effectiveContextURIForState:state];
-    BOOL contextChanged = (ctxURI.length > 0 && ![_activeContextURI isEqualToString:ctxURI]);
+    NSString *prevCtx = _activeContextURI ?: @"";
+    BOOL contextChanged = (np != nil && ![prevCtx isEqualToString:ctxURI]);
     if (contextChanged) {
         _activeContextURI = [ctxURI copy];
         _contextEntries = nil;
@@ -1592,7 +1605,7 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     NSMutableArray<SGRQueueItem *> *unshuffled = [NSMutableArray array];
     NSMutableArray<SGRQueueItem *> *allOtherContextItems = [NSMutableArray array];
 
-    if (_contextEntries.count > 0 && _nowPlayingItem) {
+    if (!SGRIsNonContextURI(_activeContextURI) && _contextEntries.count > 0 && _nowPlayingItem) {
         NSInteger curIdx = [self indexOfItem:_nowPlayingItem inContextEntries:_contextEntries];
         if (curIdx != NSNotFound) {
             for (NSUInteger i = 0; i < _contextEntries.count; i++) {
@@ -2710,18 +2723,20 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     NSString *albumText = self.item.albumTitle ?: @"";
 
     CGFloat titleSingleH = ceil(titleFont.lineHeight);
-    CGFloat measuredTitleH = ceil([titleAttr boundingRectWithSize:CGSizeMake(textW, titleSingleH * 2.0 + 4.0)
+    CGFloat titleMaxH = ceil(titleFont.lineHeight * 2.0 + 2.0);
+    CGFloat measuredTitleH = ceil([titleAttr boundingRectWithSize:CGSizeMake(textW, titleMaxH + 2.0)
                                                          options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                                          context:nil].size.height);
-    CGFloat titleH = MIN(titleSingleH * 2.0, MAX(titleSingleH, measuredTitleH));
+    CGFloat titleH = MIN(titleMaxH, MAX(titleSingleH, measuredTitleH));
 
     CGFloat artistH = artistText.length ? ceil(artistFont.lineHeight) : 0.0;
     CGFloat albumSingleH = ceil(albumFont.lineHeight);
-    CGFloat measuredAlbumH = albumText.length ? ceil([albumText boundingRectWithSize:CGSizeMake(textW, albumSingleH * 2.0 + 4.0)
+    CGFloat albumMaxH = ceil(albumFont.lineHeight * 2.0 + 2.0);
+    CGFloat measuredAlbumH = albumText.length ? ceil([albumText boundingRectWithSize:CGSizeMake(textW, albumMaxH + 2.0)
                                                                              options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
                                                                           attributes:@{NSFontAttributeName: albumFont}
                                                                              context:nil].size.height) : 0.0;
-    CGFloat albumH = albumText.length ? MIN(albumSingleH * 2.0, MAX(albumSingleH, measuredAlbumH)) : 0.0;
+    CGFloat albumH = albumText.length ? MIN(albumMaxH, MAX(albumSingleH, measuredAlbumH)) : 0.0;
 
     CGFloat gap1 = artistH > 0.0 ? 2.5 : 0.0;
     CGFloat gap2 = albumH > 0.0 ? 2.0 : 0.0;
@@ -3483,9 +3498,10 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     NSArray<SGRQueueItem *> *uq   = session.userQueuedItems;
     NSArray<SGRQueueItem *> *next = session.continuePlayingItems;
 
-    NSMutableString *fp = [NSMutableString stringWithFormat:@"NP:%@|%@|M:%lu|H:%lu|Q:%lu|N:%lu|S:%d|",
+    NSMutableString *fp = [NSMutableString stringWithFormat:@"NP:%@|%@|M:%lu|H:%lu|Q:%lu|N:%lu|S:%d|A:%d|",
                            np.uri ?: @"", np.title ?: @"", (unsigned long)session.metadataRevision,
-                           (unsigned long)hist.count, (unsigned long)uq.count, (unsigned long)next.count, session.isShuffling ? 1 : 0];
+                           (unsigned long)hist.count, (unsigned long)uq.count, (unsigned long)next.count,
+                           session.isShuffling ? 1 : 0, SGFlag(SGRKeyQueueAutoplay, YES) ? 1 : 0];
     for (NSUInteger i = 0; i < MIN((NSUInteger)40, uq.count); i++) {
         [fp appendFormat:@"Q%@:%@,", uq[i].key, uq[i].title ?: @""];
     }
@@ -5314,9 +5330,8 @@ static void SGRPlayerSkipToNextTrack(id<SPTPlayer> player) {
     NSString *trackURI = item.uri ?: @"";
     NSString *trackTitle = item.title ?: @"";
 
-    SGRSetAlbumTrackToFocus(trackURI, trackTitle);
-
     void (^performAction)(void) = ^{
+        SGRSetAlbumTrackToFocus(trackURI, trackTitle);
         SGRPlayerMinimizeIfOpen();
         if (albumURI.length) {
             SGOpenSpotifyURI([NSURL URLWithString:albumURI]);

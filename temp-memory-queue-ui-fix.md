@@ -47,5 +47,6 @@ Special constraint: Keep Spotify's checkmark/plus UI icon at Apple Music's star 
 - [x] Refine preview card visual parity (`#1A191B`, dynamic card height, 2-line album wrapping, SF Pro Display `'opsz'` fallback, chevron clearance).
 - [x] Harden preview commit (`UIContextMenuInteractionCommitStyleDismiss`) and `AlbumRows.x` focus (exact title match, off-screen step scan, full-width highlight pulse, already-open album support).
 - [x] Rename `memory.md` to `temp-memory-queue-ui-fix.md`.
-- [ ] Run `check-layers.sh` and syntax/balance verification, then safety commit & push `feat/apple-music-queue`.
-- [ ] Address Search Results + Autoplay OFF bug in `temp-memory-autoplay-queue-fix.md`.
+- [x] Run `check-layers.sh` and syntax/balance verification, then safety commit & push `feat/apple-music-queue`.
+- [x] Address Search Results + Autoplay OFF bug in `temp-memory-autoplay-queue-fix.md`.
+- [x] Bug check passes (Pass 1 & 2) and deslopification passes (Pass 1 & 2) completed.

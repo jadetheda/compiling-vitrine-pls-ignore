@@ -227,20 +227,23 @@ static BOOL trackTitleMatchesFocus(NSString *candidate, NSString *focus) {
     return [a caseInsensitiveCompare:b] == NSOrderedSame;
 }
 
+static void centerCellInScrollerIfNeeded(UIView *cell, UIScrollView *scroller) {
+    if (!cell || !scroller) return;
+    CGFloat maxY = scroller.contentSize.height - scroller.bounds.size.height;
+    if (maxY <= 0.0) return;
+    CGRect rectInScroll = [scroller convertRect:cell.bounds fromView:cell];
+    CGFloat visibleTop = scroller.contentOffset.y + 110.0;
+    CGFloat visibleBot = scroller.contentOffset.y + scroller.bounds.size.height - 96.0;
+    if (CGRectGetMinY(rectInScroll) < visibleTop || CGRectGetMaxY(rectInScroll) > visibleBot) {
+        CGFloat targetY = MAX(0.0, MIN(maxY, CGRectGetMidY(rectInScroll) - scroller.bounds.size.height * 0.42));
+        [scroller setContentOffset:CGPointMake(scroller.contentOffset.x, targetY) animated:YES];
+    }
+}
+
 static void scrollAndPulseMatchedCell(UIView *cell, UIScrollView *scroller) {
     if (!cell) return;
-    void (^animatePulse)(void) = ^{
-        if (scroller) {
-            CGRect rectInScroll = [scroller convertRect:cell.bounds fromView:cell];
-            CGFloat maxY = MAX(0.0, scroller.contentSize.height - scroller.bounds.size.height);
-            CGFloat visibleTop = scroller.contentOffset.y + 110.0;
-            CGFloat visibleBot = scroller.contentOffset.y + scroller.bounds.size.height - 96.0;
-            if (maxY > 0 && (CGRectGetMinY(rectInScroll) < visibleTop || CGRectGetMaxY(rectInScroll) > visibleBot)) {
-                CGFloat targetY = CGRectGetMidY(rectInScroll) - scroller.bounds.size.height * 0.42;
-                targetY = MAX(0.0, MIN(maxY, targetY));
-                [scroller setContentOffset:CGPointMake(scroller.contentOffset.x, targetY) animated:YES];
-            }
-        }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        centerCellInScrollerIfNeeded(cell, scroller);
         UIView *pulse = [[UIView alloc] initWithFrame:cell.bounds];
         pulse.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         pulse.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.16];
@@ -252,7 +255,7 @@ static void scrollAndPulseMatchedCell(UIView *cell, UIScrollView *scroller) {
         } completion:^(__unused BOOL finished) {
             [pulse removeFromSuperview];
         }];
-    };
+    });
 
     if (scroller && scroller.contentSize.height <= scroller.bounds.size.height) {
         __weak UIView *weakCell = cell;
@@ -260,16 +263,9 @@ static void scrollAndPulseMatchedCell(UIView *cell, UIScrollView *scroller) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             UIView *sc = weakCell;
             UIScrollView *ss = weakScroller;
-            if (!sc || !sc.window) return;
-            if (ss && ss.contentSize.height > ss.bounds.size.height) {
-                CGRect r = [ss convertRect:sc.bounds fromView:sc];
-                CGFloat maxY = MAX(0.0, ss.contentSize.height - ss.bounds.size.height);
-                CGFloat targetY = MAX(0.0, MIN(maxY, CGRectGetMidY(r) - ss.bounds.size.height * 0.42));
-                [ss setContentOffset:CGPointMake(ss.contentOffset.x, targetY) animated:YES];
-            }
+            if (sc && sc.window && ss) centerCellInScrollerIfNeeded(sc, ss);
         });
     }
-    dispatch_async(dispatch_get_main_queue(), animatePulse);
 }
 
 static BOOL isTrackContent(UIView *content);
@@ -302,6 +298,14 @@ static void scheduleFocusScanStep(UICollectionView *list, NSInteger stepsLeft) {
     if (tryFocusVisibleCellsInCollectionView(list)) {
         sgr_focusStepScheduled = NO;
         return;
+    }
+    if (stepsLeft == 35 && list.contentOffset.y > 4.0) {
+        [list setContentOffset:CGPointZero animated:NO];
+        [list layoutIfNeeded];
+        if (tryFocusVisibleCellsInCollectionView(list)) {
+            sgr_focusStepScheduled = NO;
+            return;
+        }
     }
     CGFloat maxY = list.contentSize.height - list.bounds.size.height;
     if (maxY > 0 && list.contentOffset.y < maxY - 2.0) {
@@ -380,23 +384,25 @@ static void applyRow(UIView *cell, UIView *page) {
     applyHairline(row);
     if (hidesCredits()) applyCredit(cell, row, page);
 
-    UICollectionView *listView = nil;
-    for (UIView *p = cell.superview; p; p = p.superview) {
-        if ([p isKindOfClass:UICollectionView.class]) {
-            listView = (UICollectionView *)p;
-            break;
-        }
-    }
-    if (listView) sgr_lastAlbumCollectionView = listView;
-
     NSString *focus = SGRFocusTrackTitle();
+    if (!sgr_lastAlbumCollectionView || !sgr_lastAlbumCollectionView.window || focus.length) {
+        UICollectionView *listView = nil;
+        for (UIView *p = cell.superview; p; p = p.superview) {
+            if ([p isKindOfClass:UICollectionView.class]) {
+                listView = (UICollectionView *)p;
+                break;
+            }
+        }
+        if (listView) sgr_lastAlbumCollectionView = listView;
+    }
+
     if (focus.length) {
         UIView *titleWrap = SGRFindByIdentifier(row, @"EncoreConsumerMobile.View.Granular.Title", &kTitleKey);
         UILabel *tLabel = onlyLabel(titleWrap);
         if (trackTitleMatchesFocus(tLabel.text, focus)) {
             SGRClearAlbumTrackFocus();
-            scrollAndPulseMatchedCell(cell, listView);
-        } else if (listView && !sgr_focusStepScheduled) {
+            scrollAndPulseMatchedCell(cell, sgr_lastAlbumCollectionView);
+        } else if (sgr_lastAlbumCollectionView && !sgr_focusStepScheduled) {
             triggerFocusScanIfNeeded();
         }
     }
