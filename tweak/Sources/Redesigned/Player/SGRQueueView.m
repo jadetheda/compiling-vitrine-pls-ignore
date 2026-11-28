@@ -625,6 +625,7 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
     BOOL _optimisticShuffleValue;
     CFTimeInterval _optimisticShuffleUntil;
     BOOL _lastTrackWasNonAutoplay;
+    BOOL _lastIsPaused;
 }
 
 + (instancetype)shared {
@@ -1100,6 +1101,36 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     return ctx ?: @"";
 }
 
+- (BOOL)isPlayerTrackAutoplay:(SPTPlayerTrack *)track {
+    if (!track) return NO;
+    if (SGRIsUserQueuedTrack(track)) return NO;
+    if (SGRIsAutoplayTrack(track)) return YES;
+    NSString *prov = ([track respondsToSelector:@selector(provider)] && [track.provider isKindOfClass:NSString.class]) ? track.provider : nil;
+    if ([prov containsString:@"autoplay"] || [prov containsString:@"recommendation"]) return YES;
+
+    // Search context has no context entries: all non-user-queued tracks are search recommendations / autoplay
+    if ([_activeContextURI hasPrefix:@"spotify:search"] || [_activeContextURI containsString:@":search:"]) {
+        return YES;
+    }
+
+    if ([_activeContextURI hasPrefix:@"spotify:track:"] || [_activeContextURI hasPrefix:@"spotify:station:"] || [_activeContextURI containsString:@":radio:"]) {
+        return YES;
+    }
+
+    // Context-backed (album, playlist, artist, collection):
+    if (_contextEntries.count > 0) {
+        NSString *uri = SGURIString([track respondsToSelector:@selector(URI)] ? track.URI : nil);
+        NSString *uid = SGRTrackUID(track);
+        for (SGRContextTrackEntry *entry in _contextEntries) {
+            if (uid.length && [entry.uid isEqualToString:uid]) return NO;
+            if (uri.length && [entry.uri isEqualToString:uri]) return NO;
+        }
+        return YES; // Not in context entries -> tail autoplay track!
+    }
+
+    return NO;
+}
+
 - (void)requestUncappedStateForState:(SPTPlayerState *)state {
     if (!state.track) return;
     id<SPTPlayer> player = (id<SPTPlayer>)SGPlayer();
@@ -1201,7 +1232,13 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
         }
     }
 
+    BOOL wasPaused = _lastIsPaused;
+    _lastIsPaused = state.isPaused;
+
     SGRQueueItem *incomingNP = [SGRQueueItem itemFromPlayerTrack:np fallbackContextURI:ctxURI occurrence:0];
+    if ([self isPlayerTrackAutoplay:np]) {
+        incomingNP.isAutoplay = YES;
+    }
     [self enrichQueueItem:incomingNP];
     if (incomingNP.uri.length) [self querySavedIfNeededForURI:incomingNP.uri];
 
@@ -1210,7 +1247,14 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
 
     // Enforce Autoplay off: when a context finishes and Spotify advances onto an autoplay track, pause cleanly.
     if (newURI.length && prevURI.length && ![newURI isEqualToString:prevURI]) {
-        if (!SGFlag(SGRKeyQueueAutoplay, YES) && _lastTrackWasNonAutoplay && incomingNP.isAutoplay && !incomingNP.isUserQueued && !state.isPaused) {
+        BOOL incomingIsAuto = incomingNP.isAutoplay;
+        BOOL shouldPauseAutoplay = (!SGFlag(SGRKeyQueueAutoplay, YES) &&
+                                    !contextChanged &&
+                                    !wasPaused &&
+                                    incomingIsAuto &&
+                                    !incomingNP.isUserQueued &&
+                                    !state.isPaused);
+        if (shouldPauseAutoplay) {
             id<SPTPlayer> player = (id<SPTPlayer>)SGPlayer();
             if ([player respondsToSelector:@selector(pause:)]) {
                 @try { [player pause:nil]; } @catch (__unused NSException *e) {}
@@ -1393,6 +1437,9 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
         SPTPlayerTrack *t = (SPTPlayerTrack *)obj;
         SGRQueueItem *it = [SGRQueueItem itemFromPlayerTrack:t fallbackContextURI:_activeContextURI occurrence:occ++];
         if (!it) continue;
+        if ([self isPlayerTrackAutoplay:t]) {
+            it.isAutoplay = YES;
+        }
         if (!autoplayOn && it.isAutoplay && !it.isUserQueued) continue;
         [self enrichQueueItem:it];
         if (it.uid.length && !liveTrackByUID[it.uid]) liveTrackByUID[it.uid] = t;
@@ -1474,9 +1521,11 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     }
 
     if (unshuffled.count == 0 && allOtherContextItems.count == 0) {
-        [unshuffled addObjectsFromArray:liveContextFuture];
-        [allOtherContextItems addObjectsFromArray:liveContextFuture];
-    } else if (!_isShuffling && liveContextFuture.count > unshuffled.count) {
+        if (autoplayOn) {
+            [unshuffled addObjectsFromArray:liveContextFuture];
+            [allOtherContextItems addObjectsFromArray:liveContextFuture];
+        }
+    } else if (autoplayOn && !_isShuffling && liveContextFuture.count > unshuffled.count) {
         // Append any autoplay/tail tracks that Spotify's 80-track lookahead resolved after the end of the context
         NSMutableSet<NSString *> *existingKeys = [NSMutableSet setWithCapacity:unshuffled.count];
         for (SGRQueueItem *u in unshuffled) [existingKeys addObject:u.key];
@@ -1497,29 +1546,34 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
         [finalList addObjectsFromArray:unshuffled];
     } else if (state.options.shufflingContext && liveContextFuture.count > 2) {
         // Spotify's C++ core returned its genuine active shuffled queue (up to 80 real SPTPlayerTrack items)!
-        NSMutableSet<NSString *> *placedKeys = [NSMutableSet setWithCapacity:liveContextFuture.count];
-        NSMutableSet<NSString *> *placedURIs = [NSMutableSet setWithCapacity:liveContextFuture.count];
-        if (_nowPlayingItem.uri.length) [placedURIs addObject:_nowPlayingItem.uri];
-        for (SGRQueueItem *lf in liveContextFuture) {
-            [placedKeys addObject:lf.key];
-            if (lf.uri.length) [placedURIs addObject:lf.uri];
-            [finalList addObject:lf];
-        }
-        // For playlists larger than 80 tracks, append remaining unplayed context tracks in stable shuffled order
-        if (allOtherContextItems.count > liveContextFuture.count) {
-            NSMutableArray<SGRQueueItem *> *extraPool = [NSMutableArray array];
-            for (SGRQueueItem *cand in allOtherContextItems) {
-                if (![placedKeys containsObject:cand.key] && ![placedURIs containsObject:cand.uri]) {
-                    [extraPool addObject:cand];
-                }
+        if (autoplayOn || _contextEntries.count > 0) {
+            NSMutableSet<NSString *> *placedKeys = [NSMutableSet setWithCapacity:liveContextFuture.count];
+            NSMutableSet<NSString *> *placedURIs = [NSMutableSet setWithCapacity:liveContextFuture.count];
+            if (_nowPlayingItem.uri.length) [placedURIs addObject:_nowPlayingItem.uri];
+            for (SGRQueueItem *lf in liveContextFuture) {
+                if (!autoplayOn && lf.isAutoplay) continue;
+                [placedKeys addObject:lf.key];
+                if (lf.uri.length) [placedURIs addObject:lf.uri];
+                [finalList addObject:lf];
             }
-            [self appendShuffledPool:extraPool into:finalList resetOrder:shuffleJustTurnedOn seedLive:nil];
+            // For playlists larger than 80 tracks, append remaining unplayed context tracks in stable shuffled order
+            if (allOtherContextItems.count > liveContextFuture.count) {
+                NSMutableArray<SGRQueueItem *> *extraPool = [NSMutableArray array];
+                for (SGRQueueItem *cand in allOtherContextItems) {
+                    if (![placedKeys containsObject:cand.key] && ![placedURIs containsObject:cand.uri]) {
+                        [extraPool addObject:cand];
+                    }
+                }
+                [self appendShuffledPool:extraPool into:finalList resetOrder:shuffleJustTurnedOn seedLive:nil];
+            }
         }
     } else {
         // Optimistic/fallback shuffled mode while core shuffle response is still arriving
-        NSArray<SGRQueueItem *> *pool = unshuffled.count > 0 ? unshuffled : allOtherContextItems;
-        NSArray<SGRQueueItem *> *seedLive = state.options.shufflingContext ? liveContextFuture : nil;
-        [self appendShuffledPool:pool into:finalList resetOrder:shuffleJustTurnedOn seedLive:seedLive];
+        NSArray<SGRQueueItem *> *pool = unshuffled.count > 0 ? unshuffled : (autoplayOn ? allOtherContextItems : @[]);
+        if (pool.count > 0) {
+            NSArray<SGRQueueItem *> *seedLive = state.options.shufflingContext ? liveContextFuture : nil;
+            [self appendShuffledPool:pool into:finalList resetOrder:shuffleJustTurnedOn seedLive:seedLive];
+        }
     }
 
     SGRApplyCustomKeyOrder(finalList, _customOrderedKeys);
@@ -4044,6 +4098,9 @@ static UIImage *SGRNowPlayingSaveImage(BOOL isSaved) {
     SGSetEnabled(SGRKeyQueueAutoplay, next);
     [[SGRQueueSession shared] refreshForAutoplaySettingChange];
     [self updatePlaybackPillsWithState:SGPlayerState()];
+    [self syncFromSessionAnimatedReorder:NO forceRebuild:YES];
+    [self setNeedsLayout];
+    [self layoutIfNeeded];
 }
 
 - (void)handleTransitionsPillTap {
