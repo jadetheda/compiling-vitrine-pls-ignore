@@ -14,6 +14,7 @@
 #import "Shared/SpotifyPrefs/SpotifyPrefs.h"
 #import "Player.h"
 #import "Redesigned/Album/Album.h"
+#import <CoreText/CoreText.h>
 
 @interface SPTPlayerTrack (SGRQueueConstruct)
 - (instancetype)initWithURI:(NSURL *)uri albumURI:(NSURL *)album artistURI:(NSURL *)artist andUID:(NSString *)uid;
@@ -65,14 +66,20 @@ static UIFont *SGRQueueDisplayFont(CGFloat size, UIFontWeight weight) {
     if (SGAppFontChosen() == SGAppFontSystem) {
         NSString *suffix = (weight >= UIFontWeightBold) ? @"Bold" : (weight >= UIFontWeightSemibold ? @"Semibold" : (weight >= UIFontWeightMedium ? @"Medium" : @"Regular"));
         UIFont *font = [UIFont fontWithName:[NSString stringWithFormat:@".SFUIDisplay-%@", suffix] size:size];
-        if (!font) {
-            UIFontDescriptor *desc = [UIFontDescriptor fontDescriptorWithFontAttributes:@{
-                UIFontDescriptorFamilyAttribute: @".SF UI Display",
-                UIFontDescriptorTraitsAttribute: @{UIFontWeightTrait: @(weight)},
-            }];
-            font = [UIFont fontWithDescriptor:desc size:size];
+        if (font && [font.fontName containsString:@"SFUI"]) return font;
+
+        UIFont *base = [UIFont systemFontOfSize:size weight:weight];
+        NSMutableDictionary *attrs = [base.fontDescriptor.fontAttributes mutableCopy] ?: [NSMutableDictionary dictionary];
+        NSMutableDictionary *vars = [attrs[(__bridge NSString *)kCTFontVariationAttribute] mutableCopy] ?: [NSMutableDictionary dictionary];
+        vars[@(0x6F70737A)] = @(28.0); // 'opsz' Display optical master
+        attrs[(__bridge NSString *)kCTFontVariationAttribute] = vars;
+        attrs[(__bridge NSString *)kCTFontOpticalSizeAttribute] = @(28.0);
+        UIFontDescriptor *dispDesc = [UIFontDescriptor fontDescriptorWithFontAttributes:attrs];
+        UIFont *dispFont = dispDesc ? [UIFont fontWithDescriptor:dispDesc size:size] : nil;
+        if (dispFont && ([dispFont.fontName containsString:@"SFUI"] || [dispFont.familyName containsString:@"System"])) {
+            return dispFont;
         }
-        if (font) return font;
+        return base;
     }
     return SGRQueueFont(size, weight);
 }
@@ -604,6 +611,7 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
 @property (nonatomic, readonly) NSString *contextSubtitle;
 @property (nonatomic, readonly) BOOL isShuffling;
 @property (nonatomic, readonly) NSUInteger metadataRevision;
+@property (nonatomic, readonly) NSString *activeContextURI;
 
 + (instancetype)shared;
 - (void)ensureResolvedIfNeeded;
@@ -718,6 +726,10 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
     return _metadataRevision;
 }
 
+- (NSString *)activeContextURI {
+    return _activeContextURI ?: @"";
+}
+
 - (NSString *)contextSubtitle {
     SPTPlayerState *state = SGPlayerState() ?: _uncappedState;
     SPTPlayerTrack *np = state.track;
@@ -759,7 +771,7 @@ static NSDictionary<NSString *, SGRResolvedTrackMeta *> *SGRParseBatchedTrackMet
             desc = _nowPlayingItem.artist ?: @"";
         } else if ([ctxURI hasPrefix:@"spotify:station:"] || [ctxURI containsString:@":radio:"]) {
             desc = _nowPlayingItem.title.length ? [NSString stringWithFormat:@"%@ Radio", _nowPlayingItem.title] : @"Radio";
-        } else if ([ctxURI hasPrefix:@"spotify:search"]) {
+        } else if ([ctxURI hasPrefix:@"spotify:search"] || [ctxURI containsString:@":search"]) {
             desc = @"Search";
         }
     }
@@ -1174,13 +1186,23 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     }
 }
 
+static BOOL SGRIsNonContextURI(NSString *ctxURI) {
+    if (!ctxURI.length) return YES;
+    NSString *lower = ctxURI.lowercaseString;
+    if ([lower hasPrefix:@"spotify:search"] || [lower containsString:@":search"]) return YES;
+    if ([lower hasPrefix:@"spotify:find"] || [lower containsString:@":find:"]) return YES;
+    if ([lower hasPrefix:@"spotify:track:"]) return YES;
+    if ([lower hasPrefix:@"spotify:internal:"]) return YES;
+    if ([lower hasPrefix:@"spotify:assist:"]) return YES;
+    return NO;
+}
+
 - (NSString *)effectiveContextURIForState:(SPTPlayerState *)state {
     NSString *ctx = SGURIString([state respondsToSelector:@selector(contextURI)] ? state.contextURI : nil);
     SPTPlayerTrack *np = state.track;
     NSDictionary *meta = ([np respondsToSelector:@selector(metadata)] && [np.metadata isKindOfClass:NSDictionary.class]) ? np.metadata : nil;
-    if (!ctx.length && [meta[@"context_uri"] isKindOfClass:NSString.class]) ctx = meta[@"context_uri"];
-    if ((!ctx.length || [ctx hasPrefix:@"spotify:track:"]) && [meta[@"album_uri"] isKindOfClass:NSString.class]) {
-        ctx = meta[@"album_uri"];
+    if (!ctx.length && [meta[@"context_uri"] isKindOfClass:NSString.class]) {
+        ctx = meta[@"context_uri"];
     }
     return ctx ?: @"";
 }
@@ -1190,13 +1212,15 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     if (SGRIsUserQueuedTrack(track)) return NO;
     if (SGRIsAutoplayTrack(track)) return YES;
     NSString *prov = ([track respondsToSelector:@selector(provider)] && [track.provider isKindOfClass:NSString.class]) ? track.provider : nil;
-    if ([prov containsString:@"autoplay"] || [prov containsString:@"recommendation"]) return YES;
+    if ([prov containsString:@"autoplay"] || [prov containsString:@"recommendation"] || [prov containsString:@"search"]) return YES;
 
     NSString *uri = SGURIString([track respondsToSelector:@selector(URI)] ? track.URI : nil);
+    NSDictionary *meta = ([track respondsToSelector:@selector(metadata)] && [track.metadata isKindOfClass:NSDictionary.class]) ? track.metadata : nil;
+    NSString *trackCtx = [meta[@"context_uri"] isKindOfClass:NSString.class] ? meta[@"context_uri"] : @"";
 
-    // Search / single-track contexts have no context entries: future tracks are recommendations, while an
-    // incoming NP track is autoplay only if it was already observed in the previous autoplay recommendation lookahead.
-    if ([_activeContextURI hasPrefix:@"spotify:search"] || [_activeContextURI containsString:@":search:"] || [_activeContextURI hasPrefix:@"spotify:track:"]) {
+    // Search / empty / single-track contexts have no natural context queue: every non-user-queued future track
+    // is a recommendation/autoplay item, while an incoming NP track is autoplay if previously seen in lookahead.
+    if (SGRIsNonContextURI(_activeContextURI) || (trackCtx.length && SGRIsNonContextURI(trackCtx))) {
         if (isFuture) return YES;
         return (uri.length && [_lastAutoplayFutureURIs containsObject:uri]);
     }
@@ -1271,7 +1295,8 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     [self harvestMetadataFromTracks:rawFuture];
 
     NSString *ctxURI = [self effectiveContextURIForState:state];
-    BOOL contextChanged = (ctxURI.length > 0 && ![_activeContextURI isEqualToString:ctxURI]);
+    NSString *prevCtx = _activeContextURI ?: @"";
+    BOOL contextChanged = (np != nil && ![prevCtx isEqualToString:ctxURI]);
     if (contextChanged) {
         _activeContextURI = [ctxURI copy];
         _contextEntries = nil;
@@ -1580,7 +1605,7 @@ static void SGRApplyCustomKeyOrder(NSMutableArray<SGRQueueItem *> *items, NSArra
     NSMutableArray<SGRQueueItem *> *unshuffled = [NSMutableArray array];
     NSMutableArray<SGRQueueItem *> *allOtherContextItems = [NSMutableArray array];
 
-    if (_contextEntries.count > 0 && _nowPlayingItem) {
+    if (!SGRIsNonContextURI(_activeContextURI) && _contextEntries.count > 0 && _nowPlayingItem) {
         NSInteger curIdx = [self indexOfItem:_nowPlayingItem inContextEntries:_contextEntries];
         if (curIdx != NSNotFound) {
             for (NSUInteger i = 0; i < _contextEntries.count; i++) {
@@ -2174,7 +2199,7 @@ static UIImage *SGRRenderPillCapsuleImage(CGSize size, BOOL active, NSString *sy
 - (void)queueRowHandlePan:(UIPanGestureRecognizer *)pan forRow:(SGRQueueRowView *)row;
 - (UIMenu *)queueRowContextMenuForRow:(SGRQueueRowView *)row;
 - (UIViewController *)queueRowPreviewControllerForRow:(SGRQueueRowView *)row;
-- (void)queueRowDidCommitPreviewActionForRow:(SGRQueueRowView *)row animator:(nullable id<UIContextMenuInteractionCommitAnimating>)animator;
+- (void)queueRowDidCommitPreviewActionForRow:(SGRQueueRowView *)row animator:(id<UIContextMenuInteractionCommitAnimating>)animator;
 @end
 
 @interface SGRQueueRowView : UIView <UIGestureRecognizerDelegate, UIContextMenuInteractionDelegate>
@@ -2637,10 +2662,152 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     }];
 }
 
-- (void)contextMenuInteraction:(UIContextMenuInteraction *)interaction willPerformPreviewActionForMenuWithAnimator:(id<UIContextMenuInteractionCommitAnimating>)animator {
+- (void)contextMenuInteraction:(__unused UIContextMenuInteraction *)interaction willPerformPreviewActionForMenuWithAnimator:(id<UIContextMenuInteractionCommitAnimating>)animator {
+    animator.preferredCommitStyle = UIContextMenuInteractionCommitStyleDismiss;
     if ([self.delegate respondsToSelector:@selector(queueRowDidCommitPreviewActionForRow:animator:)]) {
         [self.delegate queueRowDidCommitPreviewActionForRow:self animator:animator];
     }
+}
+
+@end
+
+// ============================================================================
+// SGRQueuePreviewViewController: Apple Music Long-Press Track Preview Card
+// ============================================================================
+
+@interface SGRQueuePreviewViewController : UIViewController
+@property (nonatomic, strong) SGRQueueItem *item;
+@property (nonatomic, strong) UIImage *artImage;
+@end
+
+@implementation SGRQueuePreviewViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+    CGFloat cardW = MIN(342.0, screenW - 32.0);
+
+    // Solid opaque charcoal (#1A191B) matching Apple Music's preview card without background bleed
+    self.view.backgroundColor = [UIColor colorWithRed:(26.0 / 255.0) green:(25.0 / 255.0) blue:(27.0 / 255.0) alpha:1.0];
+    self.view.layer.cornerRadius = 22.0;
+    self.view.layer.cornerCurve = kCACornerCurveContinuous;
+    self.view.clipsToBounds = YES;
+
+    CGFloat artSide = 92.0;
+    CGFloat textX = 16.0 + artSide + 14.0;
+    CGFloat textW = (cardW - 38.0) - textX;
+
+    UIFont *titleFont = SGRQueueDisplayFont(17.5, UIFontWeightBold);
+    NSString *rawTitle = self.item.title.length ? self.item.title : @"Track";
+    NSMutableAttributedString *titleAttr = [[NSMutableAttributedString alloc] initWithString:rawTitle attributes:@{
+        NSFontAttributeName: titleFont,
+        NSForegroundColorAttributeName: UIColor.whiteColor,
+    }];
+    if (self.item.isExplicit) {
+        UIImage *badgeImg = SGRExplicitBadgeImageNP();
+        if (badgeImg) {
+            [titleAttr appendAttributedString:[[NSAttributedString alloc] initWithString:@"\u2009" attributes:@{
+                NSFontAttributeName: titleFont,
+            }]];
+            NSTextAttachment *att = [[NSTextAttachment alloc] init];
+            att.image = badgeImg;
+            att.bounds = CGRectMake(0.0, -1.5, badgeImg.size.width, badgeImg.size.height);
+            [titleAttr appendAttributedString:[NSAttributedString attributedStringWithAttachment:att]];
+        }
+    }
+
+    UIFont *artistFont = SGRQueueFont(14.5, UIFontWeightRegular);
+    UIFont *albumFont = SGRQueueFont(13.5, UIFontWeightRegular);
+    NSString *artistText = self.item.artist ?: @"";
+    NSString *albumText = self.item.albumTitle ?: @"";
+
+    CGFloat titleSingleH = ceil(titleFont.lineHeight);
+    CGFloat titleMaxH = ceil(titleFont.lineHeight * 2.0 + 2.0);
+    CGFloat measuredTitleH = ceil([titleAttr boundingRectWithSize:CGSizeMake(textW, titleMaxH + 2.0)
+                                                         options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                                         context:nil].size.height);
+    CGFloat titleH = MIN(titleMaxH, MAX(titleSingleH, measuredTitleH));
+
+    CGFloat artistH = artistText.length ? ceil(artistFont.lineHeight) : 0.0;
+    CGFloat albumSingleH = ceil(albumFont.lineHeight);
+    CGFloat albumMaxH = ceil(albumFont.lineHeight * 2.0 + 2.0);
+    CGFloat measuredAlbumH = albumText.length ? ceil([albumText boundingRectWithSize:CGSizeMake(textW, albumMaxH + 2.0)
+                                                                             options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+                                                                          attributes:@{NSFontAttributeName: albumFont}
+                                                                             context:nil].size.height) : 0.0;
+    CGFloat albumH = albumText.length ? MIN(albumMaxH, MAX(albumSingleH, measuredAlbumH)) : 0.0;
+
+    CGFloat gap1 = artistH > 0.0 ? 2.5 : 0.0;
+    CGFloat gap2 = albumH > 0.0 ? 2.0 : 0.0;
+    CGFloat totalTextH = titleH + gap1 + artistH + gap2 + albumH;
+
+    CGFloat cardH = MAX(124.0, totalTextH + 28.0);
+    self.preferredContentSize = CGSizeMake(cardW, cardH);
+
+    UIImageView *art = [[UIImageView alloc] initWithFrame:CGRectMake(16.0, round((cardH - artSide) * 0.5), artSide, artSide)];
+    art.contentMode = UIViewContentModeScaleAspectFill;
+    art.clipsToBounds = YES;
+    art.layer.cornerRadius = 12.0;
+    art.layer.cornerCurve = kCACornerCurveContinuous;
+    art.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+    art.userInteractionEnabled = NO;
+    art.accessibilityElementsHidden = YES;
+    art.image = self.artImage;
+    if (!self.artImage && self.item.artworkURL) {
+        __weak typeof(art) weakArt = art;
+        SGRLoadQueueArtwork(self.item.artworkURL, ^(UIImage *loaded) {
+            __strong typeof(weakArt) strongArt = weakArt;
+            if (strongArt && loaded) strongArt.image = loaded;
+        });
+    }
+    [self.view addSubview:art];
+
+    UIImageSymbolConfiguration *chevCfg = [UIImageSymbolConfiguration configurationWithPointSize:14.5 weight:UIImageSymbolWeightSemibold];
+    UIImageView *chev = [[UIImageView alloc] initWithImage:[[UIImage systemImageNamed:@"chevron.right" withConfiguration:chevCfg] imageWithTintColor:[UIColor colorWithWhite:1.0 alpha:0.35] renderingMode:UIImageRenderingModeAlwaysOriginal]];
+    chev.frame = CGRectMake(cardW - 16.0 - 10.0, (cardH - 14.0) * 0.5, 10.0, 14.0);
+    chev.contentMode = UIViewContentModeScaleAspectFit;
+    chev.userInteractionEnabled = NO;
+    chev.accessibilityElementsHidden = YES;
+    [self.view addSubview:chev];
+
+    CGFloat textY = round((cardH - totalTextH) * 0.5);
+
+    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(textX, textY, textW, titleH)];
+    titleLabel.attributedText = titleAttr;
+    titleLabel.numberOfLines = 2;
+    titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    titleLabel.userInteractionEnabled = NO;
+    titleLabel.accessibilityElementsHidden = YES;
+    [self.view addSubview:titleLabel];
+
+    if (artistH > 0.0) {
+        UILabel *artistLabel = [[UILabel alloc] initWithFrame:CGRectMake(textX, textY + titleH + gap1, textW, artistH)];
+        artistLabel.text = artistText;
+        artistLabel.font = artistFont;
+        artistLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.58];
+        artistLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        artistLabel.userInteractionEnabled = NO;
+        artistLabel.accessibilityElementsHidden = YES;
+        [self.view addSubview:artistLabel];
+    }
+
+    if (albumH > 0.0) {
+        UILabel *albumLabel = [[UILabel alloc] initWithFrame:CGRectMake(textX, textY + titleH + gap1 + artistH + gap2, textW, albumH)];
+        albumLabel.text = albumText;
+        albumLabel.font = albumFont;
+        albumLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.44];
+        albumLabel.numberOfLines = 2;
+        albumLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        albumLabel.userInteractionEnabled = NO;
+        albumLabel.accessibilityElementsHidden = YES;
+        [self.view addSubview:albumLabel];
+    }
+
+    self.view.isAccessibilityElement = YES;
+    self.view.accessibilityLabel = [NSString stringWithFormat:@"%@, %@, %@", rawTitle, artistText, albumText];
+    self.view.accessibilityHint = @"Double tap to view album";
+    self.view.accessibilityTraits = UIAccessibilityTraitButton;
 }
 
 @end
@@ -3331,9 +3498,10 @@ static UIColor *SGRQueueDeleteRedColor(void) {
     NSArray<SGRQueueItem *> *uq   = session.userQueuedItems;
     NSArray<SGRQueueItem *> *next = session.continuePlayingItems;
 
-    NSMutableString *fp = [NSMutableString stringWithFormat:@"NP:%@|%@|M:%lu|H:%lu|Q:%lu|N:%lu|S:%d|",
+    NSMutableString *fp = [NSMutableString stringWithFormat:@"NP:%@|%@|M:%lu|H:%lu|Q:%lu|N:%lu|S:%d|A:%d|",
                            np.uri ?: @"", np.title ?: @"", (unsigned long)session.metadataRevision,
-                           (unsigned long)hist.count, (unsigned long)uq.count, (unsigned long)next.count, session.isShuffling ? 1 : 0];
+                           (unsigned long)hist.count, (unsigned long)uq.count, (unsigned long)next.count,
+                           session.isShuffling ? 1 : 0, SGFlag(SGRKeyQueueAutoplay, YES) ? 1 : 0];
     for (NSUInteger i = 0; i < MIN((NSUInteger)40, uq.count); i++) {
         [fp appendFormat:@"Q%@:%@,", uq[i].key, uq[i].title ?: @""];
     }
@@ -4975,144 +5143,11 @@ static void SGRPlayerSkipToNextTrack(id<SPTPlayer> player) {
 
 #pragma mark - Long-Press Context Menu & Preview Card
 
-@interface SGRQueuePreviewViewController : UIViewController
-@property (nonatomic, strong) SGRQueueItem *item;
-@property (nonatomic, strong) UIImage *artImage;
-@property (nonatomic, copy) void (^onCommitAction)(void);
-@end
-
-@implementation SGRQueuePreviewViewController
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
-    CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
-    CGFloat cardW = MIN(342.0, screenW - 32.0);
-    CGFloat cardH = 124.0;
-    self.preferredContentSize = CGSizeMake(cardW, cardH);
-
-    self.view.layer.cornerRadius = 22.0;
-    self.view.layer.cornerCurve = kCACornerCurveContinuous;
-    self.view.clipsToBounds = YES;
-    self.view.backgroundColor = [UIColor colorWithRed:0.102 green:0.098 blue:0.106 alpha:0.96];
-
-    UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemThickMaterialDark]];
-    blur.frame = CGRectMake(0.0, 0.0, cardW, cardH);
-    blur.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    blur.userInteractionEnabled = NO;
-    blur.accessibilityElementsHidden = YES;
-    [self.view addSubview:blur];
-
-    UIImageView *art = [[UIImageView alloc] initWithFrame:CGRectMake(16.0, 16.0, 92.0, 92.0)];
-    art.contentMode = UIViewContentModeScaleAspectFill;
-    art.clipsToBounds = YES;
-    art.layer.cornerRadius = 14.0;
-    art.layer.cornerCurve = kCACornerCurveContinuous;
-    art.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.12];
-    art.userInteractionEnabled = NO;
-    art.accessibilityElementsHidden = YES;
-    art.image = self.artImage;
-    if (!self.artImage && self.item.artworkURL) {
-        __weak typeof(art) weakArt = art;
-        SGRLoadQueueArtwork(self.item.artworkURL, ^(UIImage *loaded) {
-            __strong typeof(weakArt) strongArt = weakArt;
-            if (strongArt && loaded) strongArt.image = loaded;
-        });
-    }
-    [self.view addSubview:art];
-
-    UIImageSymbolConfiguration *chevCfg = [UIImageSymbolConfiguration configurationWithPointSize:15.0 weight:UIImageSymbolWeightSemibold];
-    UIImageView *chev = [[UIImageView alloc] initWithImage:[[UIImage systemImageNamed:@"chevron.right" withConfiguration:chevCfg] imageWithTintColor:[UIColor colorWithWhite:1.0 alpha:0.35] renderingMode:UIImageRenderingModeAlwaysOriginal]];
-    chev.frame = CGRectMake(cardW - 16.0 - 10.0, (cardH - 14.0) * 0.5, 10.0, 14.0);
-    chev.contentMode = UIViewContentModeScaleAspectFit;
-    chev.userInteractionEnabled = NO;
-    chev.accessibilityElementsHidden = YES;
-    [self.view addSubview:chev];
-
-    CGFloat textX = 122.0;
-    CGFloat textW = (cardW - 32.0) - textX;
-
-    UIFont *titleFont = SGRQueueDisplayFont(18.0, UIFontWeightBold);
-    NSString *rawTitle = self.item.title.length ? self.item.title : @"Track";
-    NSMutableAttributedString *titleAttr = [[NSMutableAttributedString alloc] initWithString:rawTitle attributes:@{
-        NSFontAttributeName: titleFont,
-        NSForegroundColorAttributeName: UIColor.whiteColor,
-    }];
-    if (self.item.isExplicit) {
-        UIImage *badgeImg = SGRExplicitBadgeImageNP();
-        if (badgeImg) {
-            NSTextAttachment *att = [[NSTextAttachment alloc] init];
-            att.image = badgeImg;
-            att.bounds = CGRectMake(4.0, 0.0, badgeImg.size.width, badgeImg.size.height);
-            [titleAttr appendAttributedString:[NSAttributedString attributedStringWithAttachment:att]];
-        }
-    }
-
-    CGSize titleSize = [titleAttr boundingRectWithSize:CGSizeMake(textW, 48.0)
-                                               options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
-                                               context:nil].size;
-    BOOL isTwoLines = (titleSize.height > 25.0);
-    CGFloat titleH = isTwoLines ? 44.0 : 22.0;
-    CGFloat titleY = isTwoLines ? 16.0 : 24.0;
-    CGFloat artistY = titleY + titleH + 3.0;
-    CGFloat albumY = artistY + 18.0 + 2.0;
-
-    UILabel *titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(textX, titleY, textW, titleH)];
-    titleLabel.attributedText = titleAttr;
-    titleLabel.numberOfLines = 2;
-    titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    titleLabel.userInteractionEnabled = NO;
-    titleLabel.accessibilityElementsHidden = YES;
-    [self.view addSubview:titleLabel];
-
-    UILabel *artistLabel = [[UILabel alloc] initWithFrame:CGRectMake(textX, artistY, textW, 18.0)];
-    artistLabel.text = self.item.artist ?: @"";
-    artistLabel.font = SGRQueueFont(14.5, UIFontWeightRegular);
-    artistLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.62];
-    artistLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    artistLabel.userInteractionEnabled = NO;
-    artistLabel.accessibilityElementsHidden = YES;
-    [self.view addSubview:artistLabel];
-
-    UILabel *albumLabel = [[UILabel alloc] initWithFrame:CGRectMake(textX, albumY, textW, 17.0)];
-    albumLabel.text = self.item.albumTitle ?: @"";
-    albumLabel.font = SGRQueueFont(13.5, UIFontWeightRegular);
-    albumLabel.textColor = [UIColor colorWithWhite:1.0 alpha:0.42];
-    albumLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    albumLabel.userInteractionEnabled = NO;
-    albumLabel.accessibilityElementsHidden = YES;
-    [self.view addSubview:albumLabel];
-
-    self.view.isAccessibilityElement = YES;
-    self.view.accessibilityLabel = [NSString stringWithFormat:@"%@, %@, %@", rawTitle, self.item.artist ?: @"", self.item.albumTitle ?: @""];
-    self.view.accessibilityHint = @"Double tap to view album";
-    self.view.accessibilityTraits = UIAccessibilityTraitButton;
-
-    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(handleCardTap:)];
-    [self.view addGestureRecognizer:tap];
-    self.view.userInteractionEnabled = YES;
-}
-
-- (void)handleCardTap:(__unused UITapGestureRecognizer *)tap {
-    if (self.onCommitAction) {
-        self.onCommitAction();
-    }
-}
-
-@end
-
 - (UIViewController *)previewControllerForItem:(SGRQueueItem *)item artImage:(UIImage *)artImage {
     if (!item) return nil;
     SGRQueuePreviewViewController *vc = [[SGRQueuePreviewViewController alloc] init];
     vc.item = item;
     vc.artImage = artImage;
-    __weak typeof(self) weakSelf = self;
-    vc.onCommitAction = ^{
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (strongSelf) {
-            [strongSelf commitPreviewActionForItem:item animator:nil];
-        }
-    };
     return vc;
 }
 
@@ -5280,32 +5315,39 @@ static void SGRPlayerSkipToNextTrack(id<SPTPlayer> player) {
     return [self previewControllerForItem:row.item artImage:row.artView.image];
 }
 
-- (void)queueRowDidCommitPreviewActionForRow:(SGRQueueRowView *)row animator:(nullable id<UIContextMenuInteractionCommitAnimating>)animator {
+- (void)queueRowDidCommitPreviewActionForRow:(SGRQueueRowView *)row animator:(id<UIContextMenuInteractionCommitAnimating>)animator {
     [self commitPreviewActionForItem:row.item animator:animator];
 }
 
-- (void)commitPreviewActionForItem:(SGRQueueItem *)item animator:(nullable id<UIContextMenuInteractionCommitAnimating>)animator {
+- (void)commitPreviewActionForItem:(SGRQueueItem *)item animator:(id<UIContextMenuInteractionCommitAnimating>)animator {
     if (!item) return;
-    static CFTimeInterval sLastCommitTime = 0;
-    CFTimeInterval now = CACurrentMediaTime();
-    if (now - sLastCommitTime < 0.35) return;
-    sLastCommitTime = now;
 
-    NSString *albumURI = item.albumURI.length ? item.albumURI : ([_activeContextURI hasPrefix:@"spotify:album:"] ? _activeContextURI : @"");
+    NSString *activeCtx = [SGRQueueSession shared].activeContextURI ?: @"";
+    NSString *albumURI = item.albumURI.length ? item.albumURI : ([activeCtx hasPrefix:@"spotify:album:"] ? activeCtx : @"");
+    if (!albumURI.length && item.playerTrack) {
+        albumURI = SGRTrackAlbumURI(item.playerTrack, nil, activeCtx);
+    }
     NSString *trackURI = item.uri ?: @"";
-
-    SGRSetAlbumTrackToFocus(trackURI, item.title);
+    NSString *trackTitle = item.title ?: @"";
 
     void (^performAction)(void) = ^{
+        SGRSetAlbumTrackToFocus(trackURI, trackTitle);
         SGRPlayerMinimizeIfOpen();
         if (albumURI.length) {
             SGOpenSpotifyURI([NSURL URLWithString:albumURI]);
         } else if (trackURI.length) {
             SGOpenSpotifyURI([NSURL URLWithString:trackURI]);
         }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [NSNotificationCenter.defaultCenter postNotificationName:SGRAlbumTrackFocusRequestedNotification object:nil];
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.50 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [NSNotificationCenter.defaultCenter postNotificationName:SGRAlbumTrackFocusRequestedNotification object:nil];
+        });
     };
 
     if (animator) {
+        animator.preferredCommitStyle = UIContextMenuInteractionCommitStyleDismiss;
         [animator addCompletion:performAction];
     } else {
         performAction();
@@ -5352,6 +5394,7 @@ static void SGRPlayerSkipToNextTrack(id<SPTPlayer> player) {
 
 - (void)contextMenuInteraction:(UIContextMenuInteraction *)interaction willPerformPreviewActionForMenuWithAnimator:(id<UIContextMenuInteractionCommitAnimating>)animator {
     if (interaction.view == _nowPlayingCard) {
+        animator.preferredCommitStyle = UIContextMenuInteractionCommitStyleDismiss;
         [self commitPreviewActionForItem:_currentItem animator:animator];
     }
 }

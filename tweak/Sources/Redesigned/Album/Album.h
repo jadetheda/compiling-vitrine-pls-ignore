@@ -65,6 +65,7 @@ void SGRAlbumSetSpotifyColor(UIView *view, UIColor *color);
 void SGRAlbumHoldPage(UIView *page);
 
 // Focus target track from queue preview card
+extern NSNotificationName const SGRAlbumTrackFocusRequestedNotification;
 void SGRSetAlbumTrackToFocus(NSString *uri, NSString *title);
 NSString *SGRFocusTrackTitle(void);
 NSString *SGRFocusTrackURI(void);

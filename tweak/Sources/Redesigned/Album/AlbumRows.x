@@ -208,14 +208,140 @@ static void applyCredit(UIView *cell, UIView *row, UIView *page) {
 #pragma mark - the rows
 
 
+NSNotificationName const SGRAlbumTrackFocusRequestedNotification = @"SGRAlbumTrackFocusRequestedNotification";
+
 static NSString *sgr_focusTrackURI;
 static NSString *sgr_focusTrackTitle;
 static CFTimeInterval sgr_focusSetTimestamp;
+static __weak UICollectionView *sgr_lastAlbumCollectionView;
+static BOOL sgr_focusStepScheduled = NO;
+
+static NSString *normalizedTrackTitle(NSString *text) {
+    return [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] ?: @"";
+}
+
+static BOOL trackTitleMatchesFocus(NSString *candidate, NSString *focus) {
+    NSString *a = normalizedTrackTitle(candidate);
+    NSString *b = normalizedTrackTitle(focus);
+    if (!a.length || !b.length) return NO;
+    return [a caseInsensitiveCompare:b] == NSOrderedSame;
+}
+
+static void centerCellInScrollerIfNeeded(UIView *cell, UIScrollView *scroller) {
+    if (!cell || !scroller) return;
+    CGFloat maxY = scroller.contentSize.height - scroller.bounds.size.height;
+    if (maxY <= 0.0) return;
+    CGRect rectInScroll = [scroller convertRect:cell.bounds fromView:cell];
+    CGFloat visibleTop = scroller.contentOffset.y + 110.0;
+    CGFloat visibleBot = scroller.contentOffset.y + scroller.bounds.size.height - 96.0;
+    if (CGRectGetMinY(rectInScroll) < visibleTop || CGRectGetMaxY(rectInScroll) > visibleBot) {
+        CGFloat targetY = MAX(0.0, MIN(maxY, CGRectGetMidY(rectInScroll) - scroller.bounds.size.height * 0.42));
+        [scroller setContentOffset:CGPointMake(scroller.contentOffset.x, targetY) animated:YES];
+    }
+}
+
+static void scrollAndPulseMatchedCell(UIView *cell, UIScrollView *scroller) {
+    if (!cell) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        centerCellInScrollerIfNeeded(cell, scroller);
+        UIView *pulse = [[UIView alloc] initWithFrame:cell.bounds];
+        pulse.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        pulse.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.16];
+        pulse.userInteractionEnabled = NO;
+        pulse.accessibilityElementsHidden = YES;
+        [cell addSubview:pulse];
+        [UIView animateWithDuration:0.85 delay:0.25 options:UIViewAnimationOptionCurveEaseOut animations:^{
+            pulse.alpha = 0.0;
+        } completion:^(__unused BOOL finished) {
+            [pulse removeFromSuperview];
+        }];
+    });
+
+    if (scroller && scroller.contentSize.height <= scroller.bounds.size.height) {
+        __weak UIView *weakCell = cell;
+        __weak UIScrollView *weakScroller = scroller;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            UIView *sc = weakCell;
+            UIScrollView *ss = weakScroller;
+            if (sc && sc.window && ss) centerCellInScrollerIfNeeded(sc, ss);
+        });
+    }
+}
+
+static BOOL isTrackContent(UIView *content);
+
+static BOOL tryFocusVisibleCellsInCollectionView(UICollectionView *list) {
+    NSString *focus = SGRFocusTrackTitle();
+    if (!focus.length || !list || !list.window) return NO;
+    for (UICollectionViewCell *cell in list.visibleCells) {
+        if (!isTrackContent(cell.contentView.subviews.firstObject)) continue;
+        UIView *titleWrap = SGRFindByIdentifier(cell, @"EncoreConsumerMobile.View.Granular.Title", &kTitleKey);
+        UILabel *tLabel = onlyLabel(titleWrap);
+        if (trackTitleMatchesFocus(tLabel.text, focus)) {
+            SGRClearAlbumTrackFocus();
+            scrollAndPulseMatchedCell(cell, list);
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void scheduleFocusScanStep(UICollectionView *list, NSInteger stepsLeft) {
+    if (stepsLeft <= 0 || !list || !list.window || !SGRFocusTrackTitle().length) {
+        sgr_focusStepScheduled = NO;
+        return;
+    }
+    if (list.isTracking || list.isDecelerating) {
+        sgr_focusStepScheduled = NO;
+        return;
+    }
+    if (tryFocusVisibleCellsInCollectionView(list)) {
+        sgr_focusStepScheduled = NO;
+        return;
+    }
+    if (stepsLeft == 35 && list.contentOffset.y > 4.0) {
+        [list setContentOffset:CGPointZero animated:NO];
+        [list layoutIfNeeded];
+        if (tryFocusVisibleCellsInCollectionView(list)) {
+            sgr_focusStepScheduled = NO;
+            return;
+        }
+    }
+    CGFloat maxY = list.contentSize.height - list.bounds.size.height;
+    if (maxY > 0 && list.contentOffset.y < maxY - 2.0) {
+        CGFloat step = MAX(180.0, list.bounds.size.height * 0.65);
+        CGFloat nextY = MIN(maxY, list.contentOffset.y + step);
+        [list setContentOffset:CGPointMake(list.contentOffset.x, nextY) animated:NO];
+        [list layoutIfNeeded];
+        if (tryFocusVisibleCellsInCollectionView(list)) {
+            sgr_focusStepScheduled = NO;
+            return;
+        }
+    }
+    __weak UICollectionView *weakList = list;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        scheduleFocusScanStep(weakList, stepsLeft - 1);
+    });
+}
+
+static void triggerFocusScanIfNeeded(void) {
+    UICollectionView *list = sgr_lastAlbumCollectionView;
+    if (!list || !list.window || !SGRFocusTrackTitle().length) return;
+    if (tryFocusVisibleCellsInCollectionView(list)) return;
+    if (sgr_focusStepScheduled) return;
+    sgr_focusStepScheduled = YES;
+    __weak UICollectionView *weakList = list;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        scheduleFocusScanStep(weakList, 35);
+    });
+}
 
 void SGRSetAlbumTrackToFocus(NSString *uri, NSString *title) {
     sgr_focusTrackURI = [uri copy];
     sgr_focusTrackTitle = [title copy];
     sgr_focusSetTimestamp = CACurrentMediaTime();
+    sgr_focusStepScheduled = NO;
+    [NSNotificationCenter.defaultCenter postNotificationName:SGRAlbumTrackFocusRequestedNotification object:nil];
 }
 
 NSString *SGRFocusTrackTitle(void) {
@@ -235,6 +361,7 @@ NSString *SGRFocusTrackURI(void) {
 void SGRClearAlbumTrackFocus(void) {
     sgr_focusTrackTitle = nil;
     sgr_focusTrackURI = nil;
+    sgr_focusStepScheduled = NO;
 }
 
 static void applyRow(UIView *cell, UIView *page) {
@@ -258,42 +385,25 @@ static void applyRow(UIView *cell, UIView *page) {
     if (hidesCredits()) applyCredit(cell, row, page);
 
     NSString *focus = SGRFocusTrackTitle();
+    if (!sgr_lastAlbumCollectionView || !sgr_lastAlbumCollectionView.window || focus.length) {
+        UICollectionView *listView = nil;
+        for (UIView *p = cell.superview; p; p = p.superview) {
+            if ([p isKindOfClass:UICollectionView.class]) {
+                listView = (UICollectionView *)p;
+                break;
+            }
+        }
+        if (listView) sgr_lastAlbumCollectionView = listView;
+    }
+
     if (focus.length) {
         UIView *titleWrap = SGRFindByIdentifier(row, @"EncoreConsumerMobile.View.Granular.Title", &kTitleKey);
         UILabel *tLabel = onlyLabel(titleWrap);
-        if (tLabel.text.length && ([tLabel.text isEqualToString:focus] ||
-                                   [tLabel.text hasPrefix:focus] ||
-                                   [focus hasPrefix:tLabel.text])) {
+        if (trackTitleMatchesFocus(tLabel.text, focus)) {
             SGRClearAlbumTrackFocus();
-            UIScrollView *scroller = nil;
-            for (UIView *p = cell.superview; p; p = p.superview) {
-                if ([p isKindOfClass:UIScrollView.class]) {
-                    scroller = (UIScrollView *)p;
-                    break;
-                }
-            }
-            if (scroller) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    CGRect rectInScroll = [scroller convertRect:cell.bounds fromView:cell];
-                    CGFloat targetY = CGRectGetMidY(rectInScroll) - scroller.bounds.size.height * 0.45;
-                    CGFloat maxY = scroller.contentSize.height - scroller.bounds.size.height;
-                    if (maxY > 0) {
-                        targetY = MAX(0.0, MIN(maxY, targetY));
-                        [scroller setContentOffset:CGPointMake(0, targetY) animated:YES];
-                    }
-                    UIView *pulse = [[UIView alloc] initWithFrame:cell.bounds];
-                    pulse.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.18];
-                    pulse.userInteractionEnabled = NO;
-                    pulse.layer.cornerRadius = 8.0;
-                    pulse.layer.cornerCurve = kCACornerCurveContinuous;
-                    [cell addSubview:pulse];
-                    [UIView animateWithDuration:0.85 delay:0.20 options:UIViewAnimationOptionCurveEaseOut animations:^{
-                        pulse.alpha = 0.0;
-                    } completion:^(__unused BOOL finished) {
-                        [pulse removeFromSuperview];
-                    }];
-                });
-            }
+            scrollAndPulseMatchedCell(cell, sgr_lastAlbumCollectionView);
+        } else if (sgr_lastAlbumCollectionView && !sgr_focusStepScheduled) {
+            triggerFocusScanIfNeeded();
         }
     }
 }
@@ -337,4 +447,12 @@ static BOOL isTrackContent(UIView *content) {
     if (!SGRedesignedUI()) return;
     %init;
     SGRequireClasses(@[@"_TtC12Element_List18CollectionViewCell"]);
+    [NSNotificationCenter.defaultCenter addObserverForName:SGRAlbumTrackFocusRequestedNotification
+                                                      object:nil
+                                                       queue:nil
+                                                  usingBlock:^(__unused NSNotification *note) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            triggerFocusScanIfNeeded();
+        });
+    }];
 }
